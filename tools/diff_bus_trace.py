@@ -21,11 +21,23 @@ THE 68000. Two comparisons over the same accesses:
 Only the lanes both sides drove are compared: a byte write has an undefined
 value on the idle half of the bus.
 
-THE DS5002FP. Every MOVX to the shared RAM in order (address, direction,
-data), then where each falls among the 68000's accesses (the n68k column):
-MAME runs the two CPUs in lockstep, so a handshake that drifts shows there
-first. The n68k figures are reported as the largest drift, not diffed: the
-core's 8051 does not take the real chip's cycles per instruction.
+Then the same every-access comparison again, this time picking up after a
+divergence where IRQ 6 was taken at a neighbouring instruction: fx68k and
+MAME's m68000 sample the interrupt at slightly different points of some
+instructions, so now and then one of them takes the same IRQ an instruction
+later. The streams are realigned on the next run of RESYNC_RUN identical
+accesses within RESYNC_WINDOW of the divergence, and each realignment is
+named: "irq entry" when an IRQ vector read (000078) is among the accesses
+skipped or the few after them, "irq return" when the first difference is the RTE reading back a
+stacked PC that differs, "other" for anything else. Only "other" fails.
+
+THE DS5002FP. Its MOVX accesses to the shared RAM as a program sees them:
+every write in order (address, data), and every read that returned a value
+different from the last read of the same address. Repeated reads of an
+unchanged byte are polling, and their number is timing: the core's 8051
+(mc8051) does not take the real chip's cycles per instruction, so it polls
+a different number of times between events. Where each event falls among
+the 68000's accesses (the n68k column) is reported as the largest drift.
 """
 import sys
 from collections import Counter
@@ -130,13 +142,94 @@ def compare68(name, a, m):
     return False
 
 
+RESYNC_WINDOW = 64
+RESYNC_RUN = 64
+
+
+def same(x, y):
+    return (x[0] == y[0] and x[1] == y[1] and x[3] == y[3]
+            and (x[2] & x[3]) == (y[2] & y[3]))
+
+
+def compare68_resync(a, m):
+    i = j = 0
+    events = []
+    while i < len(a) and j < len(m):
+        if same(a[i], m[j]):
+            i += 1; j += 1
+            continue
+        found = None
+        for tot in range(1, 2 * RESYNC_WINDOW + 1):
+            for di in range(max(0, tot - RESYNC_WINDOW), min(RESYNC_WINDOW, tot) + 1):
+                dj = tot - di
+                if i + di + RESYNC_RUN > len(a) or j + dj + RESYNC_RUN > len(m):
+                    continue
+                if all(same(a[i + di + k], m[j + dj + k]) for k in range(RESYNC_RUN)):
+                    found = (di, dj)
+                    break
+            if found:
+                break
+        if not found:
+            events.append((i, j, None, None, "unrecoverable"))
+            break
+        di, dj = found
+        # the stacking writes come before the vector read, so look a little past
+        if any(r[0] == 0x78 and r[1] == "R" for r in a[i:i + di + 8] + m[j:j + dj + 8]):
+            kind = "irq entry"
+        elif a[i][1] == "R" and m[j][1] == "R" and a[i][0] == m[j][0] and 0xfe8000 <= a[i][0]:
+            kind = "irq return"
+        else:
+            kind = "other"
+        events.append((i, j, di, dj, kind))
+        i += di; j += dj
+    kinds = Counter(e[4] for e in events)
+    n = min(len(a), len(m))
+    print(f"\n  68000, every access, realigning after IRQ placement: "
+          f"{len(events)} realignments ({', '.join(f'{v} {k}' for k, v in sorted(kinds.items())) or 'none'})")
+    bad = [e for e in events if e[4] in ("other", "unrecoverable")]
+    for e in events[:12]:
+        print(f"    core {e[0]:8d} mame {e[1]:8d}: {e[4]}"
+              + (f", skipped {e[2]} / {e[3]}" if e[2] is not None else ""))
+    if not bad:
+        print(f"  MATCH to the end ({i} / {j} accesses) but for IRQ placement")
+        return True
+    e = bad[0]
+    print(f"  FIRST DIVERGENCE NOT IRQ PLACEMENT at core {e[0]} / mame {e[1]} ({e[4]})")
+    k = e[0] - e[1]
+    print(f"  {'core':<31} {'mame':<22}")
+    for q in range(max(0, e[1] - 6), min(len(m), e[1] + 7)):
+        fa = fmt(a[q + k]) if 0 <= q + k < len(a) else ""
+        print(f"  {q + k:8d} {fa:<22} {fmt(m[q]):<22} {'<<' if q == e[1] else ''}")
+    return False
+
+
+def mcu_events(recs):
+    """Writes, and reads that changed: what the DS5002's program reacted to."""
+    last = {}
+    out = []
+    for r in recs:
+        n68, t13, addr, rw, d = r
+        if rw == "R":
+            if last.get(addr) == d:
+                continue
+            last[addr] = d
+        else:
+            last[addr] = d
+        out.append(r)
+    return out
+
+
 def compare_mcu(a, m, n68):
     """a, m: DS5002 records; n68: 68000 accesses both traces cover."""
     a = [r for r in a if r[0] < n68]
     m = [r for r in m if r[0] < n68]
-    n = min(len(a), len(m))
     print(f"\n  DS5002FP shared-RAM MOVX within the first {n68} 68000 accesses: "
           f"core {len(a)}, mame {len(m)}")
+    a, m = mcu_events(a), mcu_events(m)
+    # the last few events of the shorter run may not have happened yet on the
+    # other side when its 68000 trace stopped
+    n = min(len(a), len(m))
+    print(f"  writes and changed reads: core {len(a)}, mame {len(m)}")
     first = None
     drift = 0
     for i in range(n):
@@ -144,13 +237,11 @@ def compare_mcu(a, m, n68):
             first = i
             break
         drift = max(drift, abs(a[i][0] - m[i][0]))
-    if first is None and len(a) == len(m):
-        print(f"  MATCH over all {n} accesses; largest drift against the 68000 "
+    if first is None:
+        print(f"  MATCH over all {n} events; largest drift against the 68000 "
               f"{drift} of its accesses")
         return True
-    if first is None:
-        first = n
-    print(f"  FIRST DIVERGENCE at MOVX {first} (largest drift before it {drift})")
+    print(f"  FIRST DIVERGENCE at event {first} (largest drift before it {drift})")
     print(f"  {'core: n68k t13 addr rw data':<32} {'mame':<32}")
     for i in range(max(0, first - 6), min(max(len(a), len(m)), first + 7)):
         fa = "%d %d %05x %s %02x" % a[i] if i < len(a) else ""
@@ -173,8 +264,9 @@ def main():
 
     def keep(r):
         return r[1] == "W" or r[0] >= ROM_END
-    ok &= compare68("writes and data reads",
-                    [r for r in core if keep(r)], [r for r in mame if keep(r)])
+    ok_data = compare68("writes and data reads",
+                        [r for r in core if keep(r)], [r for r in mame if keep(r)])
+    ok_irq = compare68_resync(core, mame)
 
     ma, mm = load_mcu(sys.argv[1] + ".mcu"), load_mcu(sys.argv[2] + ".mcu")
     if ma is None or mm is None:
@@ -191,7 +283,8 @@ def main():
         flag = "  <- one side only" if (k not in ca) != (k not in cm) else ""
         print(f"  {k:<28} {ca.get(k, 0):8d}  {cm.get(k, 0):8d}{flag}")
 
-    return 0 if ok else 1
+    # strict match, or a match but for IRQ placement: 0; anything else: 1
+    return 0 if (ok or ok_irq) else 1
 
 
 if __name__ == "__main__":

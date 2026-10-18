@@ -10,9 +10,10 @@ mkdir -p build/obj_wrally2 build/tmp build/gen
 export TMPDIR="$PWD/build/tmp"
 # $readmemh files, read relative to where tb_wrally2 runs (--gen-dir)
 [ -f build/gen/volume_table.mem ] || python3 -I tools/gen_volume_table.py build/gen/volume_table.mem
-cp third_party/fx68k/hdl/microrom.mem third_party/fx68k/hdl/nanorom.mem build/gen/
+cmp -s third_party/fx68k/hdl/microrom.mem build/gen/microrom.mem || cp third_party/fx68k/hdl/microrom.mem build/gen/
+cmp -s third_party/fx68k/hdl/nanorom.mem build/gen/nanorom.mem || cp third_party/fx68k/hdl/nanorom.mem build/gen/
 if [ "${PIX:-mame}" = jlrh ]; then PIXG=(-GPIX_NUM=1 -GPIX_DEN=6)
-else PIXG=(-GPIX_NUM=13002 -GPIX_DEN=78125 -GIRQ_NUM=591 -GIRQ_DEN=130000000 -GIRQ_FIRST=${IRQ_FIRST:-219966}); fi
+else PIXG=(-GPIX_NUM=13002 -GPIX_DEN=78125 -GIRQ_NUM=${IRQ_NUM:-591} -GIRQ_DEN=${IRQ_DEN:-130000000} -GIRQ_FIRST=${IRQ_FIRST:-219966}); fi
 verilator --cc --exe --build -j 0 -O3 --x-assign fast --x-initial 0 \
   -Wno-fatal -Wno-lint -Wno-style -Wno-MULTIDRIVEN -Wno-TIMESCALEMOD \
   --top-module wrally2_board --Mdir "${OBJ:-build/obj_wrally2}" -o tb_wrally2 \

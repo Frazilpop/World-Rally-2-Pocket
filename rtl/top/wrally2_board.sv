@@ -3,8 +3,9 @@
 //
 // Platform-neutral: no pins, no framework. The Pocket shell (pocket/) and
 // the simulation harness (sim/wrally2/) both host this module. It replaces
-// jlrh's JTFRAME top (jtwrally2_game.v) and keeps everything under it as
-// jlrh wrote it:
+// jlrh's JTFRAME top (jtwrally2_game.v) and keeps what is under it as jlrh
+// wrote it, but for the 68000's clock (wrally2_cpu_clk: board time, below)
+// and the ADC's reset (wrally2_adc), both set by the bus trace against MAME:
 //
 //   MC68000 @ 13 MHz      wrally2_main: fx68k, the bus, work/extra/shared RAM
 //   DS5002FP @ 13 MHz     wrally2_mcu (mc8051) inside wrally2_main; its
@@ -72,8 +73,8 @@ module wrally2_board #(
     // The TLC549s' readings (Pot Wheel cabinets)
     input  wire [7:0]  wheel1, wheel2,
 
-    // Freezes the game: the 68000 between bus cycles, the DS5002 where it
-    // is. Video keeps running.
+    // Freezes the game: board time stops (no credit, no ticks), so the
+    // 68000, the DS5002 and IRQ 6 stand still. Video keeps running.
     input  wire        pause
 );
 
@@ -108,16 +109,22 @@ assign ce_pix = ce_pix_r;
 wire cpu_tick;
 wire mcu_cen = cpu_tick;
 
-reg [31:0] irq_acc;
-reg        board_irq;
+// board_irq is the tick's own clock, not a register after it: wrally2_main
+// takes it to IPL in two clocks, so IPL always changes after this tick's phi2
+// and before the next phi1, whether the CPU is running at 13 MHz or catching
+// up at 24. A clock later and that would depend on the SDRAM.
+reg  [31:0] irq_acc, irq_first;
+reg         irq_run;
+wire        irq_wrap  = irq_acc + IRQ_NUM >= IRQ_DEN;
+wire        board_irq = cpu_tick && (irq_run ? irq_wrap : irq_first == 32'd1);
 always @(posedge clk) begin
-    board_irq <= 1'b0;
-    if (cpu_rst) irq_acc <= IRQ_DEN - IRQ_FIRST * IRQ_NUM;
-    else if (cpu_tick) begin
-        if (irq_acc + IRQ_NUM >= IRQ_DEN) begin
-            irq_acc   <= irq_acc + IRQ_NUM - IRQ_DEN;
-            board_irq <= 1'b1;
-        end else irq_acc <= irq_acc + IRQ_NUM;
+    if (cpu_rst) begin
+        irq_first <= IRQ_FIRST; irq_run <= 1'b0; irq_acc <= 32'd0;
+    end else if (cpu_tick) begin
+        if (!irq_run) begin
+            irq_first <= irq_first - 32'd1;
+            if (irq_first == 32'd1) irq_run <= 1'b1;
+        end else irq_acc <= irq_wrap ? irq_acc + IRQ_NUM - IRQ_DEN : irq_acc + IRQ_NUM;
     end
 end
 
@@ -287,6 +294,8 @@ wrally2_video_top u_video (
 
 // ================================================================ harness probes
 // Read by sim/wrally2/tb_wrally2.cpp for the bus traces; nothing uses them.
+// Hierarchical, so Verilator only.
+`ifdef VERILATOR
 wire        dbg_as     /*verilator public_flat_rd*/ = ~u_main.ASn & ~(u_main.fc == 3'd7);
 wire        dbg_rw     /*verilator public_flat_rd*/ = u_main.eRWn;
 wire [23:1] dbg_eab    /*verilator public_flat_rd*/ = u_main.eab;
@@ -303,6 +312,7 @@ wire [7:0]  dbg_x_din  /*verilator public_flat_rd*/ = u_main.u_mcu.xdata_din_q;
 wire        dbg_x_cen  /*verilator public_flat_rd*/ = u_main.u_mcu.cen_eff;
 wire [15:0] dbg_x_pc   /*verilator public_flat_rd*/ = u_main.u_mcu.core_rom_adr;
 wire        dbg_cen    /*verilator public_flat_rd*/ = cpu_tick;
+`endif
 
 endmodule
 

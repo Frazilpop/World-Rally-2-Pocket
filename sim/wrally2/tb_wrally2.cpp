@@ -4,7 +4,7 @@
 //   tb_wrally2 <set.rom> <frames> <outdir> [dump frames, comma list]
 //       [--rom-lat N] [--trace file] [--trace-count N] [--mcu-trace file]
 //       [--mcu-sram] [--inputs plan.txt] [--dsw hex] [--wheel hex]
-//       [--release N] [--gen-dir dir]
+//       [--release N] [--gen-dir dir] [--ticks file]
 //
 // Hosts wrally2_board the way the Pocket shell does, with behavioural
 // memories:
@@ -87,7 +87,7 @@ int main(int argc, char** argv) {
     std::string outdir = absolute(argv[3]);
     std::set<int> dumps;
     int rom_lat = 10;
-    std::string trace_path, mcu_path, inputs_path, gen_dir = absolute("build/gen");
+    std::string trace_path, mcu_path, ticks_path, inputs_path, gen_dir = absolute("build/gen");
     long trace_count = 0;
     bool mcu_sram = false;
     unsigned dsw = 0xddff, wheel = 0x8a;
@@ -97,6 +97,7 @@ int main(int argc, char** argv) {
         else if (!strcmp(argv[i], "--trace") && i + 1 < argc)       trace_path = absolute(argv[++i]);
         else if (!strcmp(argv[i], "--trace-count") && i + 1 < argc) trace_count = atol(argv[++i]);
         else if (!strcmp(argv[i], "--mcu-trace") && i + 1 < argc)   mcu_path = absolute(argv[++i]);
+        else if (!strcmp(argv[i], "--ticks") && i + 1 < argc)       ticks_path = absolute(argv[++i]);
         else if (!strcmp(argv[i], "--mcu-sram"))                    mcu_sram = true;
         else if (!strcmp(argv[i], "--inputs") && i + 1 < argc)      inputs_path = absolute(argv[++i]);
         else if (!strcmp(argv[i], "--dsw") && i + 1 < argc)         dsw = strtoul(argv[++i], 0, 16);
@@ -251,6 +252,10 @@ int main(int argc, char** argv) {
     FILE* trace = trace_path.empty() ? nullptr : fopen(trace_path.c_str(), "w");
     FILE* mtrace = (trace && mcu_path != "none") ? fopen(mcu_path.c_str(), "w") : nullptr;
     long traced = 0, mtraced = 0;
+    // --ticks: the 68000 clock (board time since release) at the end of each
+    // traced access, one line each, and "# irq <clock>" at each IRQ 6
+    FILE* ticks = ticks_path.empty() ? nullptr : fopen(ticks_path.c_str(), "w");
+    uint64_t bclk = 0;
     // the 68000: the bus cycle's last clock before AS rises
     bool as_prev = false;
     uint32_t c_addr = 0, c_data = 0, c_mask = 0; bool c_rd = false;
@@ -282,15 +287,8 @@ int main(int argc, char** argv) {
     while (frame < frames) {
         serve_rom();
         tick();
-        if (getenv("WR2_CENDBG")) {
-            static uint64_t cens = 0, lastf = 0;
-            cens += R.wrally2_board__DOT__dbg_cen;
-            if (R.wrally2_board__DOT__dbg_irq && !irq_prev) {
-                fprintf(stderr, "irq at 68000 clock %llu (+%llu), access %ld\n", (unsigned long long)cens,
-                        (unsigned long long)(cens - lastf), traced);
-                lastf = cens;
-            }
-        }
+        bclk += R.wrally2_board__DOT__dbg_cen;
+        if (ticks && R.wrally2_board__DOT__dbg_irq) fprintf(ticks, "# irq %llu\n", (unsigned long long)bclk);
 
         // ---- 68000 bus monitor
         {
@@ -307,6 +305,7 @@ int main(int argc, char** argv) {
                 if (trace && c_mask) {
                     fprintf(trace, "%06x %c %04x %04x\n", c_addr, c_rd ? 'R' : 'W', c_data & c_mask, c_mask);
                     traced++;
+                    if (ticks) fprintf(ticks, "%llu\n", (unsigned long long)bclk);
                     if (trace_count > 0 && traced >= trace_count) {
                         fclose(trace); trace = nullptr;
                         if (mtrace) { fclose(mtrace); mtrace = nullptr; }
@@ -369,13 +368,13 @@ int main(int argc, char** argv) {
                 }
                 y = 0; x = 0;
             }
-            if (!vb && prev_vb) { y = 0; x = 0; }
             prev_hb = hb; prev_vb = vb;
         }
     }
 
     if (trace) fclose(trace);
     if (mtrace) fclose(mtrace);
+    if (ticks) fclose(ticks);
     fclose(stats);
     fprintf(stderr, "%d frames, %ld 68000 accesses and %ld DS5002 accesses traced, %llu clocks\n",
             frames, traced, mtraced, (unsigned long long)(cyc - cyc0));
