@@ -34,11 +34,18 @@ done
 #
 # name | repo | branch | role | licence | forkable | sparse paths (optional)
 #
+# A branch given as a full commit hash is a fixed pin: cloned at that commit
+# and never moved by --update.
+#
 # gaelco-fpga is the board: jlrh's World Rally 2 MiSTer core (cores/wrally2),
 # which carries its own fx68k copy and the GHDL-synthesised mc8051 netlist for
 # the DS5002FP. Its jtframe use is jtframe_dual_ram alone, so of jtcores only
 # the RAM primitives are fetched, with jt8051 beside them as the other
 # candidate for the DS5002.
+#
+# mc8051 is Oregano's VHDL, the source of jlrh's GHDL netlist mc8051_regen.v.
+# jtframe dropped it for jt8051 on 20 Aug 2026 (jtcores 74fa325), so it is held
+# at the commit before, a fixed pin that --update leaves where it is.
 #
 # fx68k: jtfpga/fx68k, whose hdl/verilator/ flattens the s_nanod struct that
 # Verilator cannot simulate in upstream's fx68k.sv (BLKANDNBLK on 'Nanod').
@@ -47,6 +54,7 @@ done
 DEPS=(
   "gaelco-fpga|jlrh/gaelco-fpga|main|the board: GAE1 video and sound, 68000 bus, DS5002 glue|GPL-3.0|yes|"
   "jtcores|jotego/jtcores|master|jtframe RAM primitives; jt8051|GPL-3.0-or-later|no|/LICENSE /modules/jtframe/LICENSE /modules/jtframe/hdl/ram/* /modules/jt8051/*"
+  "mc8051|jotego/jtcores|e5ac19e15ab693dcd054ec833bff95576a0482f8|Oregano mc8051 VHDL, the source of mc8051_regen.v|LGPL-2.1-or-later|no|/modules/jtframe/hdl/cpu/8051/*"
   "fx68k|jtfpga/fx68k|master|68000 main CPU (Verilator variant)|GPL-3.0-only|yes|"
   "pocket-utils|agg23/analogue-pocket-utils|master|Pocket shell IP: data loader, PSRAM, I2S audio, sync FIFO|MIT|yes|"
 )
@@ -136,6 +144,8 @@ for entry in "${DEPS[@]}"; do
   IFS='|' read -r name repo branch role lic forkable sparse <<< "$entry"
   dest="$VENDOR/$name"
   url="https://github.com/$repo.git"
+  fixed=0
+  if [[ "$branch" =~ ^[0-9a-f]{40}$ ]]; then fixed=1; fi
 
   if [ "$DO_FORK" = 1 ] && [ "$forkable" = "yes" ]; then
     user="$(gh api user --jq .login)"
@@ -151,7 +161,9 @@ for entry in "${DEPS[@]}"; do
   fi
 
   if [ -d "$dest/.git" ]; then
-    if [ "$DO_UPDATE" = 1 ]; then
+    if [ "$DO_UPDATE" = 1 ] && [ "$fixed" = 1 ]; then
+      echo "  $name: fixed at $branch, not updated"
+    elif [ "$DO_UPDATE" = 1 ]; then
       echo "  $name: updating"
       git -C "$dest" fetch --depth 1 origin "$branch" -q
       git -C "$dest" checkout -q FETCH_HEAD
@@ -165,7 +177,18 @@ for entry in "${DEPS[@]}"; do
     fi
   else
     echo "  $name: cloning $repo"
-    if [ -n "$sparse" ]; then
+    if [ "$fixed" = 1 ]; then
+      # One commit, fetched by hash: no branch to clone from.
+      git init -q "$dest"
+      git -C "$dest" remote add origin "$url"
+      if [ -n "$sparse" ]; then
+        git -C "$dest" sparse-checkout init --no-cone
+        # shellcheck disable=SC2086
+        git -C "$dest" sparse-checkout set $sparse
+      fi
+      git -C "$dest" fetch --depth 1 --filter=blob:none -q origin "$branch"
+      git -C "$dest" checkout -q FETCH_HEAD
+    elif [ -n "$sparse" ]; then
       # A large repository of which a few directories are wanted: blobless,
       # no checkout until the sparse patterns are set, then the pin.
       git clone --filter=blob:none --no-checkout --depth 1 --branch "$branch" -q "$url" "$dest"
@@ -285,6 +308,10 @@ Read this before copying a single line out of third_party/.
 
   jtcores      GPL-3.0-or-later — Jose Tejada (jotego). jtframe_dual_ram and
                jt8051. Re-check the headers on every --update.
+
+  mc8051       LGPL-2.1-or-later — Oregano Systems, 2001, as jtframe carried
+               it (with its cen). The VHDL behind mc8051_regen.v; LGPL.TXT
+               goes with the netlist.
 
   fx68k        GPL-3.0-only — Jorge Cwik. No or-later grant, so taking it
                makes the whole core GPL-3.0-only.
