@@ -1,0 +1,4 @@
+MC68000 @ 13 MHz, DS5002FP @ 13 MHz, Gaelco GAE1 video and 7-channel PCM sound
+
+Based on jlrh/gaelco-fpga cores/wrally2 (GPL-3.0).
+Analogue Pocket port by Frazilpop.
