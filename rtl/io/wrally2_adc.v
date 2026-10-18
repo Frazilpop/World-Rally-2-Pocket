@@ -17,7 +17,10 @@ module wrally2_adc (
 
     always @(posedge clk) begin
         if (rst) begin
-            ls259 <= 8'd0; sh0 <= 8'd0; sh1 <= 8'd0; q5p <= 1'b0; q6p <= 1'b0;
+            // The LS259 clears at reset, taking the TLC549s' /CS (Q6) low:
+            // a conversion is loaded before the program first clocks one
+            // (MAME's latch reset calls wrally2_adc_cs(0); IN0 reads 0xdf).
+            ls259 <= 8'd0; sh0 <= analog0; sh1 <= analog1; q5p <= 1'b0; q6p <= 1'b0;
         end else begin
             if (latch_we) ls259[latch_sel] <= latch_dat;
             q5p <= ls259[5];

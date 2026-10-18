@@ -30,6 +30,7 @@ module wrally2_main (
     output wire        sndreg_we,
     input  wire [15:0] snd_rdata,
 
+    output wire        cpu_tick,       // one 68000 clock of board time (wrally2_cpu_clk)
     input  wire        mcu_cen,
     output wire [14:0] mcurom_addr,
     output wire        mcurom_en,
@@ -101,16 +102,11 @@ module wrally2_main (
     wire [15:0] rom_word = prog_data;
 
     wire bus_busy  = cs_rom & rw_rd & ~prog_data_ok;
-    wire bus_cs_dt = cs_rom & rw_rd;
     wire dtack_raw;
-    wrally2_68kdtack #(.W(8)) u_dtack (
-        .rst(rst), .clk(clk), .cen_en(game_run),
-        .cpu_cen(cpu_cen), .cpu_cenb(cpu_cenb),
-        .bus_cs(bus_cs_dt), .bus_busy(bus_busy), .bus_legit(1'b0), .bus_ack(1'b0),
-        .ASn(ASn), .DSn({UDSn,LDSn}),
-
-        .num(7'd13), .den(8'd48),
-        .wait2(1'b0), .wait3(1'b0),
+    wrally2_cpu_clk u_clk (
+        .rst(rst), .clk(clk), .run(game_run),
+        .ASn(ASn), .rom_wait(bus_busy),
+        .cpu_cen(cpu_cen), .cpu_cenb(cpu_cenb), .tick(cpu_tick),
         .DTACKn(dtack_raw)
     );
 
