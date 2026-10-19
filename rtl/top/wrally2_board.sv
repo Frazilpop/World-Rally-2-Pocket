@@ -96,7 +96,16 @@ module wrally2_board #(
 
     // Freezes the game: board time stops (no credit, no ticks), so the
     // 68000, the DS5002 and IRQ 6 stand still. Video keeps running.
-    input  wire        pause
+    input  wire        pause,
+
+    // For the platform's diagnostics: board time behind wall time (ticks),
+    // IRQ 6's tick, the sprite buffer's copy running, and one clock each for
+    // a sprite or tilemap line its next line's start found unfinished.
+    output wire [11:0] diag_owed,
+    output wire        diag_irq,
+    output wire        diag_copying,
+    output wire        diag_spr_cut,
+    output wire        diag_tm_ovr
 );
 
 // SDRAM regions, word addresses
@@ -267,7 +276,7 @@ wrally2_main u_main (
     .vmem_vram_rdata(cpu_vram_rd), .vmem_pal_rdata(cpu_pal_rd),
     .vreg0(vreg0), .vreg1(vreg1), .vreg2(vreg2),
     .sndreg_cs(sndreg_cs), .sndreg_we(sndreg_we), .snd_rdata(snd_rdata),
-    .cpu_tick(cpu_tick), .cpu_hold(cpu_hold), .mcu_cen(mcu_cen),
+    .cpu_tick(cpu_tick), .cpu_hold(cpu_hold), .mcu_cen(mcu_cen), .cpu_owed(diag_owed),
     .sram_req(sram_req), .sram_we(sram_we), .sram_addr(sram_addr), .sram_din(sram_din),
     .sram_be(sram_be), .sram_ack(sram_ack), .sram_dout(sram_dout),
     .scr_dl_addr(scr_dl_addr), .scr_dl_data(scr_dl_data), .scr_dl_we(scr_dl_we),
@@ -313,8 +322,11 @@ wrally2_video_top u_video (
     .rom_as(spr_ra), .gfxs_line(spr_line), .gfxs_ok(spr_ok),
     .vga_r(r), .vga_g(g), .vga_b(b),
     .hsync(hs), .vsync(vs), .hblank(hblank), .vblank(vblank), .de(),
-    .vblank_irq(vblank_irq)
+    .vblank_irq(vblank_irq),
+    .spr_cut(diag_spr_cut), .tm_ovr(diag_tm_ovr)
 );
+assign diag_irq     = board_irq;
+assign diag_copying = vram_copying;
 
 // ================================================================ harness probes
 // Read by sim/wrally2/tb_wrally2.cpp for the bus traces; nothing uses them.

@@ -1,0 +1,54 @@
+# The board's RTL: everything wrally2_board needs that is not part of the
+# Pocket shell. ap_core.qsf pulls it in whole. Keep in step with
+# sim/wrally2/build.sh, which compiles the same list (with fx68k's
+# hdl/verilator/ variant instead).
+#
+# Paths are relative to this file (pocket/src/fpga), via $::quartus(qip_path),
+# so the list works from any project that includes it.
+#
+# Files read with $readmem relative to the project directory are copied next
+# to ap_core.qpf by pocket/build.sh before Quartus runs (all derived, all
+# gitignored): fx68k's microrom.mem and nanorom.mem, the GAE1's
+# volume_table.mem (tools/gen_volume_table.py) and jt8051's microcode,
+# jt8051.uc (tools/gen_jt8051.sh, whose headers are on the search path below).
+
+set q $::quartus(qip_path)
+set r [file join $q ../../../rtl]
+set t [file join $q ../../../third_party]
+set g [file join $q ../../../build/gen]
+
+set_global_assignment -name SYSTEMVERILOG_FILE [file join $r top/wrally2_board.sv]
+set_global_assignment -name SYSTEMVERILOG_FILE [file join $r mem/wrally2_romport.sv]
+set_global_assignment -name VERILOG_FILE       [file join $r mem/wrally2_vmem.v]
+set_global_assignment -name VERILOG_FILE       [file join $r cpu/wrally2_main.v]
+set_global_assignment -name VERILOG_FILE       [file join $r cpu/wrally2_addr_decode.v]
+set_global_assignment -name SYSTEMVERILOG_FILE [file join $r cpu/wrally2_cpu_clk.sv]
+set_global_assignment -name VERILOG_FILE       [file join $r io/wrally2_inputs.v]
+set_global_assignment -name VERILOG_FILE       [file join $r io/wrally2_adc.v]
+set_global_assignment -name VERILOG_FILE       [file join $r mcu/wrally2_mcu.v]
+set_global_assignment -name VERILOG_FILE       [file join $r video/wrally2_video_top.v]
+set_global_assignment -name VERILOG_FILE       [file join $r video/wrally2_video_timing.v]
+set_global_assignment -name VERILOG_FILE       [file join $r video/wrally2_gae1_video.v]
+set_global_assignment -name VERILOG_FILE       [file join $r video/wrally2_gae1_tilemap.v]
+set_global_assignment -name VERILOG_FILE       [file join $r video/wrally2_gae1_sprite.v]
+set_global_assignment -name VERILOG_FILE       [file join $r video/wrally2_gae1_palette.v]
+set_global_assignment -name VERILOG_FILE       [file join $r sound/wrally2_gae1_sound.v]
+
+# The DS5002FP: jt8051 (jotego), cycle-accurate, its microcode expanded at
+# build time. Its multicycles are in core/core_constraints.sdc; the macro
+# that selects it (WR2_JT8051) is in ap_core.qsf, since a .qip may not set
+# one.
+set_global_assignment -name SEARCH_PATH [file join $g jt8051]
+foreach f {jt8051.v jt8051_ctrl.v jt8051_regs.v jt8051_alu.v jt8051_periph.v jt8051_serial.v} {
+    set_global_assignment -name VERILOG_FILE [file join $t jtcores/modules/jt8051/hdl $f]
+}
+
+# jtframe's RAM primitives (the shared RAM, the 8051's internal RAM)
+foreach f {jtframe_dual_ram.v jtframe_ram_rst.v jtframe_ram.v} {
+    set_global_assignment -name VERILOG_FILE [file join $t jtcores/modules/jtframe/hdl/ram $f]
+}
+
+# fx68k: hdl/ is ijor's synthesis code.
+set_global_assignment -name SYSTEMVERILOG_FILE [file join $t fx68k/hdl/fx68k.sv]
+set_global_assignment -name SYSTEMVERILOG_FILE [file join $t fx68k/hdl/fx68kAlu.sv]
+set_global_assignment -name SYSTEMVERILOG_FILE [file join $t fx68k/hdl/uaddrPla.sv]

@@ -32,7 +32,8 @@ module wrally2_cpu_clk (
     output reg  cpu_cenb,       // fx68k enPhi2
     output reg  tick,           // with cpu_cen: one 68000 clock of board time
     output wire mid,            // between a phi1 and its phi2
-    output wire DTACKn
+    output wire DTACKn,
+    output wire [11:0] owed     // board time behind wall time, in ticks
 );
 
 reg  [5:0]  acc;
@@ -67,6 +68,7 @@ end
 // held back there would be a wait state MAME's 68000 never has.
 assign DTACKn = ASn | rom_wait;
 assign mid    = ph;
+assign owed   = credit;
 
 endmodule
 

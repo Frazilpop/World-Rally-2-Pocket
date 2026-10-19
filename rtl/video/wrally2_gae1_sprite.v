@@ -25,7 +25,10 @@ module wrally2_gae1_sprite #(
     output wire [16:0] lb_q,
 
     input  wire        wbank,
-    input  wire        rbank
+    input  wire        rbank,
+
+    // one clock when the next line's start finds this one unfinished
+    output reg         cut
 );
 
     localparam [4:0] IDLE=0, CLR=1, RDW1F=2, RDW0=3, RDW2=4, RDW3=5, SETUP=6,
@@ -129,11 +132,25 @@ module wrally2_gae1_sprite #(
         endcase
     end
 
+    // Each buffer has one write port, the draw's or the clear's by bank (the
+    // two never write the same buffer at once), so Quartus can make it an
+    // M10K; written as two statements, the buffers were 17,811 registers.
+    wire            lb0_we = is0w ? dw_s2 : clr_we_q;
+    wire [LBAW-1:0] lb0_wa = is0w ? wa_s2 : clr_wa_q;
+    wire [16:0]     lb0_wd = is0w ? wd_s2 : 17'd0;
+    wire            lb1_we = is0w ? clr_we_q : dw_s2;
+    wire [LBAW-1:0] lb1_wa = is0w ? clr_wa_q : wa_s2;
+    wire [16:0]     lb1_wd = is0w ? 17'd0 : wd_s2;
     always @(posedge clk) if (ce) begin
-
         lb0_rq <= lb0[lb0_ra];
+        if (lb0_we) lb0[lb0_wa] <= lb0_wd;
+    end
+    always @(posedge clk) if (ce) begin
         lb1_rq <= lb1[lb1_ra];
+        if (lb1_we) lb1[lb1_wa] <= lb1_wd;
+    end
 
+    always @(posedge clk) if (ce) begin
         dw_s1 <= do_write; sh_s1 <= shadow_d; pen_s1 <= pen; idx_s1 <= idx_d; wa_s1 <= lb_wa[LBAW-1:0];
         dw_s2 <= dw_s1;    wd_s2 <= lb_new;       wa_s2  <= wa_s1;
 
@@ -142,13 +159,6 @@ module wrally2_gae1_sprite #(
         lbx_prev <= lb_x[LBAW-1:0];
         clr_wa_q <= lbx_prev;
         clr_we_q <= lb_x[LBAW-1:0] != lbx_prev;
-
-        if (dw_s2) begin
-            if (is0w) lb0[wa_s2] <= wd_s2; else lb1[wa_s2] <= wd_s2;
-        end
-        if (clr_we_q) begin
-            if (is0w) lb1[clr_wa_q] <= 17'd0; else lb0[clr_wa_q] <= 17'd0;
-        end
     end
 
     always @(posedge clk) if (ce) begin
@@ -256,6 +266,8 @@ module wrally2_gae1_sprite #(
         endcase
     end
 
+    always @(posedge clk) cut <= ce & start & (state != IDLE);
+
 `ifdef VERILATOR
     // For the harness: the clocks each line takes from start to done (0xffff
     // when the next start cuts it short) and the cells it drew.
@@ -282,7 +294,7 @@ module wrally2_gae1_sprite #(
     integer k;
     initial begin state=IDLE; busy=0; spr_e=0; px=0; clr_i=0; wbank_r=0; cx=0; number=0;
         dw_s1=0; dw_s2=0; clr_we_q=0; lb0_rq=0; lb1_rq=0; wd_s2=0; wa_s2=0;
-        draw_busy=0; draw_start=0; px_d=0;
+        draw_busy=0; draw_start=0; px_d=0; cut=0;
         for (k=0;k<LBDEPTH;k=k+1) begin lb0[k]=0; lb1[k]=0; end end
     // synthesis translate_on
 endmodule

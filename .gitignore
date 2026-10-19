@@ -103,3 +103,10 @@ Thumbs.db
 # The working notes, kept on disk and never published.
 /CLAUDE.md
 /docs/
+
+# $readmem files pocket/build.sh copies next to the Pocket project
+/pocket/src/fpga/jt8051.uc
+/pocket/src/fpga/volume_table.mem
+/pocket/src/fpga/apf/build_id.mif
+# the link pocket/build.sh makes into build/ (a directory-only pattern misses a link)
+/pocket/src/fpga/output_files

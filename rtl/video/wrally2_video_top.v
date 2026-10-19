@@ -25,7 +25,11 @@ module wrally2_video_top #(
 
     output wire [7:0]  vga_r, vga_g, vga_b,
     output wire        hsync, vsync, hblank, vblank, de,
-    output wire        vblank_irq
+    output wire        vblank_irq,
+
+    // for the diagnostic overlay: a sprite line, a tilemap line cut short
+    output wire        spr_cut,
+    output wire        tm_ovr
 );
 
     wire [9:0] hpos; wire [8:0] vpos; wire frame_end;
@@ -38,14 +42,13 @@ module wrally2_video_top #(
     );
 
     wire [11:0] pal_index; wire opaque;
-    wire        tm_ovr_w;
     wrally2_gae1_video u_video (
         .clk(clk), .ce(ce_pix), .hpos(hpos), .vpos(vpos), .frame_end(frame_end),
         .vreg0(vreg0),
         .wrd_a(wrd_a), .wrd_q(wrd_q),
         .tp0_idx(tp0_idx), .tp0_rd(tp0_rd), .tp0_q(tp0_q),
         .rom_a0(rom_a0), .d0_line(gfx0_line), .gfx0_ok(gfx0_ok),
-        .pal_index(pal_index), .opaque(opaque), .tm_ovr(tm_ovr_w)
+        .pal_index(pal_index), .opaque(opaque), .tm_ovr(tm_ovr)
     );
 
     // The sprites for line L + 1 are drawn while line L shows.
@@ -76,7 +79,7 @@ module wrally2_video_top #(
         .spr_a(spr_a), .spr_q(spr_q),
         .rom_a(rom_as), .d_line(gfxs_line), .gfx_ok(gfxs_ok),
         .lb_x(hpos_lb), .lb_q(lb_q),
-        .wbank(wbank), .rbank(rbank)
+        .wbank(wbank), .rbank(rbank), .cut(spr_cut)
     );
 
     wire        spr_v   = lb_q[16];

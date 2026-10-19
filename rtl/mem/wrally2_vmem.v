@@ -86,29 +86,37 @@ reg  [1:0]  wrd_bank_q;
 reg  [12:0] b_row_q;
 reg  [1:0]  a_bank_q;
 
-reg  [15:0] a_q [0:3];
-reg  [15:0] b_q [0:3];
+// bank k's word at [16k +: 16], registered in wrally2_vram8
+wire [63:0] a_qv, b_qv;
 
+// Each bank's byte lane is a module of its own (wrally2_vram8): written as
+// arrays in this generate loop, Quartus split every one into two simple
+// dual-port copies, one a reader, 128 M10K for 64 KB.
 genvar k;
 generate for (k = 0; k < 4; k = k + 1) begin : g_vram
-    (* ramstyle = "no_rw_check" *) reg [7:0] hi [0:8191];
-    (* ramstyle = "no_rw_check" *) reg [7:0] lo [0:8191];
-    wire we = cpu_we & cs_vram & (a_bank == k);
-    always @(posedge clk) begin
-        if (we & cpu_uds) hi[a_row] <= cpu_wdata[15:8];
-        if (we & cpu_lds) lo[a_row] <= cpu_wdata[7:0];
-        a_q[k] <= {hi[a_row], lo[a_row]};
+    wire        we  = cpu_we & cs_vram & (a_bank == k);
+    wire [12:0] aa  = a_row;
+    wire [15:0] ad  = cpu_wdata;
+    wire        awh = we & cpu_uds, awl = we & cpu_lds;
 `ifdef VERILATOR
-        if (sc_we && sc_sel == 2'd0 && sc_addr[1:0] == k) begin
-            hi[sc_addr[14:2]] <= sc_data[15:8]; lo[sc_addr[14:2]] <= sc_data[7:0];
-        end
+    wire        scw = sc_we && sc_sel == 2'd0 && sc_addr[1:0] == k;
+    wire [12:0] aa_r = scw ? sc_addr[14:2] : aa;
+    wire [15:0] ad_r = scw ? sc_data : ad;
+    wire        awh_r = scw | awh, awl_r = scw | awl;
+`else
+    wire [12:0] aa_r = aa;
+    wire [15:0] ad_r = ad;
+    wire        awh_r = awh, awl_r = awl;
 `endif
-    end
-    always @(posedge clk) b_q[k] <= {hi[b_row], lo[b_row]};
+    wire [7:0]  aqh, aql, bqh, bql;
+    wrally2_vram8 u_hi (.clk(clk), .a_addr(aa_r), .a_we(awh_r), .a_d(ad_r[15:8]), .a_q(aqh), .b_addr(b_row), .b_q(bqh));
+    wrally2_vram8 u_lo (.clk(clk), .a_addr(aa_r), .a_we(awl_r), .a_d(ad_r[7:0]),  .a_q(aql), .b_addr(b_row), .b_q(bql));
+    assign a_qv[16*k +: 16] = {aqh, aql};
+    assign b_qv[16*k +: 16] = {bqh, bql};
 end endgenerate
 
-assign cpu_vram_rdata = a_q[a_bank_q];
-assign tp_q = tp_half_q ? {b_q[2], b_q[3]} : {b_q[0], b_q[1]};
+assign cpu_vram_rdata = a_qv[16*a_bank_q +: 16];
+assign tp_q = tp_half_q ? {b_qv[47:32], b_qv[63:48]} : {b_qv[15:0], b_qv[31:16]};
 
 always @(posedge clk) begin
     a_bank_q   <= a_bank;
@@ -117,7 +125,7 @@ always @(posedge clk) begin
     tp_half_q  <= tp_idx[0];
     wrd_bank_q <= wrd_a[1:0];
     if (b_kind == K_SCROLL) begin wrd_last <= wrd_a; wrd_seen <= 1'b1; end
-    if (b_kind_q == K_SCROLL) wrd_q <= b_q[wrd_bank_q];
+    if (b_kind_q == K_SCROLL) wrd_q <= b_qv[16*wrd_bank_q +: 16];
 end
 
 // ================================================================ the copy
@@ -140,7 +148,7 @@ reg  [1:0]  spr_bank_q;
 generate for (k = 0; k < 4; k = k + 1) begin : g_sbuf
     (* ramstyle = "no_rw_check" *) reg [15:0] m [0:8191];
     always @(posedge clk) begin
-        if (cp_wr) m[b_row_q] <= b_q[k];
+        if (cp_wr) m[b_row_q] <= b_qv[16*k +: 16];
 `ifdef VERILATOR
         if (sc_we && sc_sel == 2'd1 && sc_addr[1:0] == k) m[sc_addr[14:2]] <= sc_data;
 `endif
@@ -169,6 +177,25 @@ always @(posedge clk) pal_q <= {pal_hi[pal_a], pal_lo[pal_a]};
 initial begin cp_run = 1'b0; cp_wr = 1'b0; wrd_seen = 1'b0; b_kind_q = K_NONE; end
 // synthesis translate_on
 
+endmodule
+
+// One byte lane of a VRAM bank: 8K x 8, port A the 68000's (read and write),
+// port B the video's (read), both registered: one true dual-port M10K group.
+module wrally2_vram8 (
+    input  wire        clk,
+    input  wire [12:0] a_addr,
+    input  wire        a_we,
+    input  wire [7:0]  a_d,
+    output reg  [7:0]  a_q,
+    input  wire [12:0] b_addr,
+    output reg  [7:0]  b_q
+);
+(* ramstyle = "no_rw_check" *) reg [7:0] m [0:8191];
+always @(posedge clk) begin
+    if (a_we) m[a_addr] <= a_d;
+    a_q <= m[a_addr];
+end
+always @(posedge clk) b_q <= m[b_addr];
 endmodule
 
 `default_nettype wire
