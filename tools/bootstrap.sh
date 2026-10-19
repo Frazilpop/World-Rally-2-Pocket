@@ -40,8 +40,10 @@ done
 # gaelco-fpga is the board: jlrh's World Rally 2 MiSTer core (cores/wrally2),
 # which carries its own fx68k copy and the GHDL-synthesised mc8051 netlist for
 # the DS5002FP. Its jtframe use is jtframe_dual_ram alone, so of jtcores only
-# the RAM primitives are fetched, with jt8051 beside them as the other
-# candidate for the DS5002.
+# the RAM primitives are fetched, with jt8051 beside them for the DS5002 and
+# jtframe's Go source, whose ucode tool expands jt8051's microcode
+# (tools/gen_jt8051.sh; needs go). jtframe_8751mcu.v is jt8051's own wrapper,
+# the model for wrally2_mcu's.
 #
 # mc8051 is Oregano's VHDL, the source of jlrh's GHDL netlist mc8051_regen.v.
 # jtframe dropped it for jt8051 on 20 Aug 2026 (jtcores 74fa325), so it is held
@@ -53,7 +55,7 @@ done
 
 DEPS=(
   "gaelco-fpga|jlrh/gaelco-fpga|main|the board: GAE1 video and sound, 68000 bus, DS5002 glue|GPL-3.0|yes|"
-  "jtcores|jotego/jtcores|master|jtframe RAM primitives; jt8051|GPL-3.0-or-later|no|/LICENSE /modules/jtframe/LICENSE /modules/jtframe/hdl/ram/* /modules/jt8051/*"
+  "jtcores|jotego/jtcores|master|jtframe RAM primitives; jt8051 and the ucode tool that makes its headers|GPL-3.0-or-later|no|/LICENSE /modules/jtframe/LICENSE /modules/jtframe/hdl/ram/* /modules/jtframe/hdl/cpu/jtframe_8751mcu.v /modules/jtframe/hdl/sound/audio_mod.yaml /modules/jtframe/src/* /modules/jt8051/*"
   "mc8051|jotego/jtcores|e5ac19e15ab693dcd054ec833bff95576a0482f8|Oregano mc8051 VHDL, the source of mc8051_regen.v|LGPL-2.1-or-later|no|/modules/jtframe/hdl/cpu/8051/*"
   "fx68k|jtfpga/fx68k|master|68000 main CPU (Verilator variant)|GPL-3.0-only|yes|"
   "pocket-utils|agg23/analogue-pocket-utils|master|Pocket shell IP: data loader, PSRAM, I2S audio, sync FIFO|MIT|yes|"

@@ -1,10 +1,20 @@
 `default_nettype none
 
 module wrally2_gae1_sound #(
-    parameter integer CLKDIV = 6144
+    parameter integer CLKDIV = 6144,
+    // TICKDIV != 0: a sample every TICKDIV board ticks (1664 = MAME's
+    // 128 us at 13 MHz), the first on the first tick after reset, as MAME's
+    // stream computes sample k at k * 128 us from power-on. While one is
+    // being computed busy holds board time (the 68000, the DS5002 and IRQ 6),
+    // so the program sees it whole at that instant, as in MAME, where a read
+    // or write first brings the stream up to now. 0: jlrh's, a sample every
+    // CLKDIV clocks of wall time.
+    parameter integer TICKDIV = 0
 )(
     input  wire        clk,
     input  wire        rst,
+    input  wire        tick,
+    output wire        busy,
 
     input  wire        cs_sound,
     input  wire [6:0]  cpu_aw,
@@ -33,8 +43,13 @@ module wrally2_gae1_sound #(
 
     reg [12:0] divcnt;
     reg        cen;
+    wire       tick_due = (TICKDIV != 0) && tick && divcnt == 13'd0;
     always @(posedge clk) begin
         if (rst) begin divcnt <= 0; cen <= 0; end
+        else if (TICKDIV != 0) begin
+            cen <= tick_due;
+            if (tick) divcnt <= (divcnt == 13'd0) ? TICKDIV[12:0] - 13'd1 : divcnt - 13'd1;
+        end
         else if (divcnt == CLKDIV-1) begin divcnt <= 0; cen <= 1; end
         else begin divcnt <= divcnt + 1'b1; cen <= 0; end
     end
@@ -48,6 +63,7 @@ module wrally2_gae1_sound #(
     localparam [3:0] IDLE=0, CHK=1, A1SET=2, A1WAIT=3, VL=4, VLW=5, RDEC=6,
                      A2WAIT=7, VR=8, VRW=9, ACC=10, NXT=11, OUTP=12, VLB=13;
     reg [3:0]  st;
+    assign busy = (TICKDIV != 0) && (tick_due || cen || st != 4'd0);
     reg [2:0]  ch;
     reg [5:0]  base;
     reg [3:0]  vl, vr, typ;

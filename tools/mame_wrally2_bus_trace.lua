@@ -32,10 +32,17 @@
 -- Environment:
 --   BUS_TRACE_OUT        output file (default wrally2_bus_trace.txt)
 --   BUS_TRACE_COUNT      68000 accesses to record (default 200000)
+--   BUS_TRACE_FROM       start at this frame's notification ("# frame N"
+--                        first, n68k counted from there; default: power-on).
+--                        The taps go in only then, so the frames before run
+--                        at MAME's own speed.
 --   BUS_TRACE_DATA_ONLY  1 = skip instruction fetches: tap only 100000-ffffff
 --                        (everything but the program ROM). ~5x fewer Lua calls.
 --   BUS_TRACE_MCU_OUT    the DS5002FP file (see above); "none" to skip it
 --   BUS_TRACE_MCU_SRAM   1 = the DS5002FP's SRAM accesses too
+--   BUS_TRACE_TICKS      a file: the machine time of each 68000 access, in
+--                        13 MHz clocks from power-on, one line each (the
+--                        harness's --ticks)
 --   INPUTS               none (default) | race, mame_wrally2_inputs.lua
 --
 -- FROM POWER-ON, NO SYNTHETIC RESET. With -autoboot_delay 0 the script runs at
@@ -56,10 +63,12 @@
 -- with no error. The files are streamed, so a crashed run keeps what it had.
 
 local MAX  = tonumber(os.getenv("BUS_TRACE_COUNT") or "200000")
+local FROM = tonumber(os.getenv("BUS_TRACE_FROM") or "0")
 local OUT  = os.getenv("BUS_TRACE_OUT") or "wrally2_bus_trace.txt"
 local MOUT = os.getenv("BUS_TRACE_MCU_OUT") or (OUT .. ".mcu")
 local DATA_ONLY = (os.getenv("BUS_TRACE_DATA_ONLY") or "0") ~= "0"
 local MCU_SRAM  = (os.getenv("BUS_TRACE_MCU_SRAM") or "0") ~= "0"
+local TICKS     = os.getenv("BUS_TRACE_TICKS")
 
 local wr2 = dofile((os.getenv("WR2_TOOLS") or debug.getinfo(1, "S").source:match("^@(.*)/"))
                    .. "/mame_wrally2_inputs.lua")
@@ -71,7 +80,9 @@ local romname = emu.romname()
 local fmt = string.format
 
 local fh = assert(io.open(OUT, "w"))
-local mh = (MOUT ~= "none") and assert(io.open(MOUT, "w")) or nil
+-- "none" skips it (mame_oracle.sh makes the value absolute: match its last part)
+local mh = not MOUT:match("^none$") and not MOUT:match("/none$") and assert(io.open(MOUT, "w")) or nil
+local th = TICKS and assert(io.open(TICKS, "w")) or nil
 local n, nm, done, frames = 0, 0, false, 0
 local t0 = os.clock()
 
@@ -79,6 +90,7 @@ local function record(rw, offset, data, mask)
   if done then return end
   n = n + 1
   fh:write(fmt("%06x %s %04x %04x\n", offset & 0xffffff, rw, data & 0xffff, mask & 0xffff))
+  if th then th:write(fmt("%d\n", math.floor(mach.time:as_double() * 13e6 + 0.5))) end
   if (n & 0x3fff) == 0 then fh:flush() end
   if n >= MAX then done = true end
 end
@@ -98,28 +110,32 @@ print(fmt("bus trace: %s, script at machine time %.6f, PC %06x, %s",
 local ranges = DATA_ONLY and { { 0x100000, 0xffffff } } or { { 0x000000, 0xffffff } }
 _G.wr2_taps = {}
 local function keep(t) _G.wr2_taps[#_G.wr2_taps + 1] = t end
-for i, r in ipairs(ranges) do
-  keep(space:install_read_tap(r[1], r[2], "wr2_bt_r" .. i,
-    function(offset, data, mask) record("R", offset, data, mask) end))
-  keep(space:install_write_tap(r[1], r[2], "wr2_bt_w" .. i,
-    function(offset, data, mask) record("W", offset, data, mask) end))
-end
+local function install()
+  for i, r in ipairs(ranges) do
+    keep(space:install_read_tap(r[1], r[2], "wr2_bt_r" .. i,
+      function(offset, data, mask) record("R", offset, data, mask) end))
+    keep(space:install_write_tap(r[1], r[2], "wr2_bt_w" .. i,
+      function(offset, data, mask) record("W", offset, data, mask) end))
+  end
 
-if mh then
-  -- the shared window through gaelco_ds5002fp's hostmem space (MOVX 8000-ffff)
-  local host = mach.devices[":gaelco_ds5002fp"].spaces["hostmem"]
-  keep(host:install_read_tap(0x8000, 0xffff, "wr2_mcu_r",
-    function(offset, data, mask) mcu_record("R", offset, data) end))
-  keep(host:install_write_tap(0x8000, 0xffff, "wr2_mcu_w",
-    function(offset, data, mask) mcu_record("W", offset, data) end))
-  if MCU_SRAM then
-    local xdata = mach.devices[":gaelco_ds5002fp:mcu"].spaces["xdata"]
-    keep(xdata:install_read_tap(0x10000, 0x17fff, "wr2_sram_r",
+  if mh then
+    -- the shared window through gaelco_ds5002fp's hostmem space (MOVX 8000-ffff)
+    local host = mach.devices[":gaelco_ds5002fp"].spaces["hostmem"]
+    keep(host:install_read_tap(0x8000, 0xffff, "wr2_mcu_r",
       function(offset, data, mask) mcu_record("R", offset, data) end))
-    keep(xdata:install_write_tap(0x10000, 0x17fff, "wr2_sram_w",
+    keep(host:install_write_tap(0x8000, 0xffff, "wr2_mcu_w",
       function(offset, data, mask) mcu_record("W", offset, data) end))
+    if MCU_SRAM then
+      local xdata = mach.devices[":gaelco_ds5002fp:mcu"].spaces["xdata"]
+      keep(xdata:install_read_tap(0x10000, 0x17fff, "wr2_sram_r",
+        function(offset, data, mask) mcu_record("R", offset, data) end))
+      keep(xdata:install_write_tap(0x10000, 0x17fff, "wr2_sram_w",
+        function(offset, data, mask) mcu_record("W", offset, data) end))
+    end
   end
 end
+local started = FROM <= 0
+if started then install() end
 
 -- Finishing happens here, never inside a tap: exiting from a tap tears the
 -- machine down under the access in flight, and taps left installed keep
@@ -127,11 +143,13 @@ end
 _G.wr2_bt_frame = emu.add_machine_frame_notifier(function()
   frames = frames + 1
   wr2.frame(frames)
-  if not done then fh:write(fmt("# frame %d\n", frames)) end
+  if not started and frames >= FROM then started = true; install() end
+  if started and not done then fh:write(fmt("# frame %d\n", frames)) end
   if done or frames > 20000 then
     for _, t in ipairs(_G.wr2_taps) do t:remove() end
     fh:flush(); fh:close()
     if mh then mh:flush(); mh:close() end
+    if th then th:flush(); th:close() end
     print(fmt("bus trace: %d 68000 accesses, %d DS5002FP, in %d frames (%.3f s emulated), "
               .. "%.1f s CPU -> %s", n, nm, frames, mach.time:as_double(), os.clock() - t0, OUT))
     mach:exit()

@@ -2,7 +2,8 @@
 // World Rally 2 (Pocket) — whole-board harness.
 //
 //   tb_wrally2 <set.rom> <frames> <outdir> [dump frames, comma list]
-//       [--rom-lat N] [--trace file] [--trace-count N] [--mcu-trace file]
+//       [--rom-lat N] [--trace file] [--trace-count N] [--trace-from F]
+//       [--mcu-trace file]
 //       [--mcu-sram] [--inputs plan.txt] [--dsw hex] [--wheel hex]
 //       [--release N] [--gen-dir dir] [--ticks file]
 //
@@ -25,7 +26,8 @@
 // none), with "# frame N" at each vblank IRQ. --mcu-trace (default: the
 // trace's name + ".mcu") writes the DS5002FP's MOVX accesses to the shared
 // RAM, "<n68k> <t13> <addr> <R|W> <data>", as the Lua script does; with
-// --mcu-sram its own SRAM's too (addr + 0x10000).
+// --mcu-sram its own SRAM's too (addr + 0x10000). --trace-from F starts both
+// at frame F's IRQ ("# frame F" first), as the Lua script's BUS_TRACE_FROM.
 //
 // Writes frame_NNNNN.ppm (384 x 240) for each requested frame and one line
 // a frame to stats.csv.
@@ -89,6 +91,7 @@ int main(int argc, char** argv) {
     int rom_lat = 10;
     std::string trace_path, mcu_path, ticks_path, inputs_path, gen_dir = absolute("build/gen");
     long trace_count = 0;
+    int trace_from = 0;
     bool mcu_sram = false;
     unsigned dsw = 0xddff, wheel = 0x8a;
     long long release = 0;
@@ -96,6 +99,7 @@ int main(int argc, char** argv) {
         if (!strcmp(argv[i], "--rom-lat") && i + 1 < argc)          rom_lat = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--trace") && i + 1 < argc)       trace_path = absolute(argv[++i]);
         else if (!strcmp(argv[i], "--trace-count") && i + 1 < argc) trace_count = atol(argv[++i]);
+        else if (!strcmp(argv[i], "--trace-from") && i + 1 < argc)  trace_from = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--mcu-trace") && i + 1 < argc)   mcu_path = absolute(argv[++i]);
         else if (!strcmp(argv[i], "--ticks") && i + 1 < argc)       ticks_path = absolute(argv[++i]);
         else if (!strcmp(argv[i], "--mcu-sram"))                    mcu_sram = true;
@@ -252,6 +256,7 @@ int main(int argc, char** argv) {
     FILE* trace = trace_path.empty() ? nullptr : fopen(trace_path.c_str(), "w");
     FILE* mtrace = (trace && mcu_path != "none") ? fopen(mcu_path.c_str(), "w") : nullptr;
     long traced = 0, mtraced = 0;
+    bool tracing = trace_from <= 0;
     // --ticks: the 68000 clock (board time since release) at the end of each
     // traced access, one line each, and "# irq <clock>" at each IRQ 6
     FILE* ticks = ticks_path.empty() ? nullptr : fopen(ticks_path.c_str(), "w");
@@ -264,11 +269,11 @@ int main(int argc, char** argv) {
     bool x_prev = false; uint32_t x_addr = 0; bool x_wr = false; uint32_t x_data = 0;
     uint64_t x_start = 0; long x_n68 = 0;
     auto mcu_flush = [&]() {
-        if (!mtrace) return;
+        if (!mtrace || !tracing) return;
         bool shared = x_addr & 0x8000;
         if (!shared && !mcu_sram) return;
         uint32_t a = shared ? x_addr : (x_addr + 0x10000);
-        uint64_t t13 = ((x_start - cyc0) * 13 + 24) / 48;
+        uint64_t t13 = x_start;     // board time: 68000 clocks since release, MAME's 13 MHz
         fprintf(mtrace, "%ld %llu %05x %c %02x\n", x_n68, (unsigned long long)t13, a,
                 x_wr ? 'W' : 'R', x_data & 0xff);
         mtraced++;
@@ -302,7 +307,7 @@ int main(int argc, char** argv) {
             }
             if (!as && as_prev) {
                 bus_cycles++;
-                if (trace && c_mask) {
+                if (trace && tracing && c_mask) {
                     fprintf(trace, "%06x %c %04x %04x\n", c_addr, c_rd ? 'R' : 'W', c_data & c_mask, c_mask);
                     traced++;
                     if (ticks) fprintf(ticks, "%llu\n", (unsigned long long)bclk);
@@ -321,7 +326,7 @@ int main(int argc, char** argv) {
             bool wr = R.wrally2_board__DOT__dbg_x_wr;
             if (x_prev && (!acc || a != x_addr || wr != x_wr)) mcu_flush();
             if (acc && (!x_prev || a != x_addr || wr != x_wr)) {
-                x_addr = a; x_wr = wr; x_start = cyc; x_n68 = traced;
+                x_addr = a; x_wr = wr; x_start = bclk; x_n68 = traced;
             }
             if (acc) x_data = wr ? R.wrally2_board__DOT__dbg_x_dout : R.wrally2_board__DOT__dbg_x_din;
             x_prev = acc;
@@ -331,7 +336,8 @@ int main(int argc, char** argv) {
         {
             bool irq = R.wrally2_board__DOT__dbg_irq;
             if (irq && !irq_prev) {
-                if (trace) fprintf(trace, "# frame %d\n", frame + 1);
+                if (frame + 1 >= trace_from) tracing = true;
+                if (trace && tracing) fprintf(trace, "# frame %d\n", frame + 1);
                 fprintf(stats, "%d,%llu,%llu,%ld\n", frame, (unsigned long long)(cyc - cyc0),
                         (unsigned long long)(bus_cycles - bus_cycles_f), mtraced - mcu_f);
                 bus_cycles_f = bus_cycles; mcu_f = mtraced;

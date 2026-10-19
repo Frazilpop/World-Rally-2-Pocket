@@ -8,8 +8,9 @@
 // and the ADC's reset (wrally2_adc), both set by the bus trace against MAME:
 //
 //   MC68000 @ 13 MHz      wrally2_main: fx68k, the bus, work/extra/shared RAM
-//   DS5002FP @ 13 MHz     wrally2_mcu (mc8051) inside wrally2_main; its
-//                         program here, filled from the ROM image
+//   DS5002FP @ 13 MHz     wrally2_mcu (jt8051; mc8051 without WR2_JT8051)
+//                         inside wrally2_main; its program here, filled
+//                         from the ROM image
 //   GAE1 video            wrally2_video_top, the left screen (index 0)
 //   GAE1 sound            wrally2_gae1_sound, 7 channels; the right output
 //
@@ -35,7 +36,16 @@ module wrally2_board #(
     // (811,008 clocks at 48 MHz); MAME's 59.1 Hz is 591/130000000.
     parameter int unsigned IRQ_NUM   = 1,
     parameter int unsigned IRQ_DEN   = 219648,
-    parameter int unsigned IRQ_FIRST = 219648
+    parameter int unsigned IRQ_FIRST = 219648,
+    // The DS5002 as MAME clocks it (the harness; 0 on the Pocket, as the
+    // chip is). MCU_TRIM: one clock more every MCU_TRIM ticks -- MAME's mcs51
+    // rounds 13 MHz / 12 up to 1,083,334 machine cycles a second, so its
+    // DS5002 gains a clock every 1,625,000. MCU_LAG: ticks it sits out after
+    // reset, standing in for MAME's interleave, which runs the 68000 first in
+    // each slice of one DS5002 machine cycle (12 ticks), so its DS5002 sees
+    // the 68000's writes some ticks late.
+    parameter int unsigned MCU_TRIM = 0,
+    parameter int unsigned MCU_LAG  = 0
 )(
     input  wire        clk,            // 48 MHz
     input  wire        clk96,          // 96 MHz, same PLL: the sprite engine
@@ -102,12 +112,38 @@ assign ce_pix = ce_pix_r;
 
 // Board time: one tick per 68000 clock (wrally2_cpu_clk), 13 MHz on
 // average. The DS5002FP shares the 68000's 13 MHz crystal, so it takes one
-// clock a tick (wrally2_mcu divides by 12 for its machine cycles), and
+// clock a tick (twelve to its machine cycle: jt8051 counts them itself,
+// mc8051 behind wrally2_mcu's divider), and
 // IRQ 6 is counted in ticks: the CPUs and the interrupt keep MAME's
 // lockstep whatever the SDRAM does. (jlrh: 12 MHz, or 13/48 behind
 // WR2_CEN_FRAC, from the 48 MHz clock; the IRQ from the video timing.)
 wire cpu_tick;
-wire mcu_cen = cpu_tick;
+// The GAE1 counts its samples in ticks too, and holds board time while it
+// computes one (wrally2_gae1_sound, TICKDIV): the 68000 reads the channels'
+// positions, so they must move when MAME's do.
+wire snd_busy;
+
+// Clocks the DS5002 is owed beyond the ticks (MCU_TRIM): each is given with
+// board time held, on a clock with no tick or other enable on either side
+// (jt8051 never takes adjacent ones). MCU_LAG: the ticks it misses at reset.
+reg  [7:0]  mcu_owed  = 8'd0;
+reg  [7:0]  mcu_lag   = 8'd0;
+reg  [20:0] mcu_trimc = 21'd0;
+reg         mcu_extra = 1'b0;
+wire        mcu_due   = MCU_TRIM != 0 && cpu_tick && mcu_trimc == MCU_TRIM - 1;
+wire        mcu_fire  = mcu_owed != 8'd0 && !cpu_tick && !mcu_extra;
+always @(posedge clk) begin
+    if (cpu_rst) begin
+        mcu_owed <= 8'd0; mcu_lag <= MCU_LAG[7:0]; mcu_trimc <= 21'd0; mcu_extra <= 1'b0;
+    end else begin
+        if (MCU_TRIM != 0 && cpu_tick) mcu_trimc <= mcu_due ? 21'd0 : mcu_trimc + 21'd1;
+        if (cpu_tick && mcu_lag != 8'd0) mcu_lag <= mcu_lag - 8'd1;
+        mcu_owed  <= mcu_owed + {7'd0, mcu_due} - {7'd0, mcu_fire};
+        mcu_extra <= mcu_fire;
+    end
+end
+wire mcu_cen  = (cpu_tick & mcu_lag == 8'd0) | mcu_extra;
+wire cpu_hold = snd_busy | mcu_owed != 8'd0 | mcu_extra;
 
 // board_irq is the tick's own clock, not a register after it: wrally2_main
 // takes it to IPL in two clocks, so IPL always changes after this tick's phi2
@@ -192,12 +228,15 @@ wire [13:0] dl_mcu_w = dl_addr[14:1];
 
 reg  [15:0] mcu_prog [0:16383];
 wire [14:0] mcurom_addr;
+wire        mcurom_en;      // jt8051 reads its PROM on cen only, mc8051 always
 reg  [15:0] mcu_prog_q;
 reg         mcu_prog_a0;
 always @(posedge clk) begin
     if (dl_mcu) mcu_prog[dl_mcu_w] <= dl_data;
-    mcu_prog_q  <= mcu_prog[mcurom_addr[14:1]];
-    mcu_prog_a0 <= mcurom_addr[0];
+    if (mcurom_en) begin
+        mcu_prog_q  <= mcu_prog[mcurom_addr[14:1]];
+        mcu_prog_a0 <= mcurom_addr[0];
+    end
 end
 wire [7:0] mcurom_data = mcu_prog_a0 ? mcu_prog_q[15:8] : mcu_prog_q[7:0];
 
@@ -237,15 +276,15 @@ wrally2_main u_main (
     .vmem_vram_rdata(cpu_vram_rd), .vmem_pal_rdata(cpu_pal_rd),
     .vreg0(vreg0), .vreg1(vreg1), .vreg2(vreg2),
     .sndreg_cs(sndreg_cs), .sndreg_we(sndreg_we), .snd_rdata(snd_rdata),
-    .cpu_tick(cpu_tick), .mcu_cen(mcu_cen), .mcurom_addr(mcurom_addr), .mcurom_en(), .mcurom_data(mcurom_data),
+    .cpu_tick(cpu_tick), .cpu_hold(cpu_hold), .mcu_cen(mcu_cen), .mcurom_addr(mcurom_addr), .mcurom_en(mcurom_en), .mcurom_data(mcurom_data),
     .scr_dl_clk(clk), .scr_dl_addr(scr_dl_addr), .scr_dl_data(scr_dl_data), .scr_dl_we(scr_dl_we),
     .dbg_mcu_pcmax(), .dbg_mcu_fetch(), .dbg_mcuw(), .dbg_mcu_scrw(), .dbg_key()
 );
 
 // ================================================================ sound
 wire signed [15:0] snd_l, snd_r;
-wrally2_gae1_sound u_snd (
-    .clk(clk), .rst(cpu_rst),
+wrally2_gae1_sound #(.TICKDIV(1664)) u_snd (
+    .clk(clk), .rst(cpu_rst), .tick(cpu_tick), .busy(snd_busy),
     .cs_sound(sndreg_cs), .cpu_aw(vmem_addr[7:1]), .cpu_we(sndreg_we),
     .cpu_uds(vmem_uds), .cpu_lds(vmem_lds), .cpu_wdata(vmem_wdata), .cpu_rdata(snd_rdata),
     .rom_addr(snd_ra), .rom_cs(snd_cs), .rom_data(gfx_word(snd_line, snd_ra[21])), .rom_ok(snd_ok),

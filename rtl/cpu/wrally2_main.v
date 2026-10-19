@@ -31,6 +31,7 @@ module wrally2_main (
     input  wire [15:0] snd_rdata,
 
     output wire        cpu_tick,       // one 68000 clock of board time (wrally2_cpu_clk)
+    input  wire        cpu_hold,       // board time stands still (the GAE1 computing a sample)
     input  wire        mcu_cen,
     output wire [14:0] mcurom_addr,
     output wire        mcurom_en,
@@ -105,7 +106,7 @@ module wrally2_main (
     wire dtack_raw;
     wrally2_cpu_clk u_clk (
         .rst(rst), .clk(clk), .run(game_run),
-        .ASn(ASn), .rom_wait(bus_busy),
+        .ASn(ASn), .rom_wait(bus_busy | cpu_hold),
         .cpu_cen(cpu_cen), .cpu_cenb(cpu_cenb), .tick(cpu_tick),
         .DTACKn(dtack_raw)
     );
