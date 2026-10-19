@@ -11,10 +11,12 @@ module wrally2_gae1_tilemap (
     output reg         busy,
 
     output reg  [13:0] tp_idx,
+    output wire        tp_rd,
     input  wire [31:0] tp_q,
 
-    output reg  [21:0] rom_a,
-    input  wire [7:0]  d_p0, d_p1, d_p2, d_p3,
+    // a fetch line: tile row half rom_a, plane p in d_line[8p+7:8p]
+    output reg  [20:0] rom_a,
+    input  wire [63:0] d_line,
     input  wire        gfx_ok,
 
     input  wire [9:0]  lb_x,
@@ -25,9 +27,10 @@ module wrally2_gae1_tilemap (
 
     output reg         ovr
 );
-    localparam [2:0] IDLE=0, REQ=1, RDTP=2, ATTR=3, WAITG=4, WAITG4=5, PIX=6, DONE=7;
+    localparam [2:0] IDLE=0, REQ=1, RDTP=2, ATTR=3, WAITG=4, PIX=6, DONE=7;
 
     reg [2:0]  state;
+    assign tp_rd = state == RDTP;
     reg [9:0]  sx;
     reg        wbank_r;
     reg [4:0]  ty_r;
@@ -35,7 +38,6 @@ module wrally2_gae1_tilemap (
     reg [9:0]  tmx_r;
 
     reg [15:0] code_r; reg flipx_r, flipy_r; reg [6:0] color_r;
-    reg [20:0] elem_r;
     reg [7:0]  g0, g1, g2, g3, g4;
 
     reg [11:0] lb0 [0:511];
@@ -91,20 +93,12 @@ module wrally2_gae1_tilemap (
             ATTR: begin
                 code_r  <= code_w; flipx_r <= flipx_w; flipy_r <= flipy_w;
                 color_r <= {1'b0, word0[14:9]};
-                elem_r  <= elem_w;
-                rom_a   <= {1'b0, elem_w};
+                rom_a   <= elem_w;
                 state   <= WAITG;
             end
             WAITG: if (gfx_ok) begin
-                g0 <= d_p0; g1 <= d_p1;
-
-                g2 <= elem_r[20] ? 8'd0 : d_p2;
-                g3 <= elem_r[20] ? 8'd0 : d_p3;
-                rom_a <= {1'b1, elem_r};
-                state <= WAITG4;
-            end
-            WAITG4: if (gfx_ok) begin
-                g4 <= d_p0;
+                g0 <= d_line[7:0];   g1 <= d_line[15:8];  g2 <= d_line[23:16];
+                g3 <= d_line[31:24]; g4 <= d_line[39:32];
                 state <= PIX;
             end
             PIX: begin
@@ -137,7 +131,7 @@ module wrally2_gae1_tilemap (
     integer wcyc=0, wmax=0;
     always @(posedge clk) if (ce) begin
 
-        if ((state==WAITG || state==WAITG4) && !gfx_ok) wcyc <= wcyc + 1;
+        if (state==WAITG && !gfx_ok) wcyc <= wcyc + 1;
         else begin
             if (wcyc > wmax) begin wmax <= wcyc;
                 $display("TMLAT %m read-latency=%0d clk (max)", wcyc);

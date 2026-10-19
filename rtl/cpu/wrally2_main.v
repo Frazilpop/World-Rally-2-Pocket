@@ -33,11 +33,18 @@ module wrally2_main (
     output wire        cpu_tick,       // one 68000 clock of board time (wrally2_cpu_clk)
     input  wire        cpu_hold,       // board time stands still (the GAE1 computing a sample)
     input  wire        mcu_cen,
-    output wire [14:0] mcurom_addr,
-    output wire        mcurom_en,
-    input  wire [ 7:0] mcurom_data,
 
-    input  wire        scr_dl_clk,
+    // Work RAM (fe0000-fe7fff, SRAM words 0-3fff) and extra RAM (212000-
+    // 213fff, words 4000-4fff) on the platform's SRAM: req held until a
+    // one-clock ack, dout valid with it. Board time waits for it.
+    output reg         sram_req,
+    output reg         sram_we,
+    output reg  [16:0] sram_addr,
+    output reg  [15:0] sram_din,
+    output reg  [1:0]  sram_be,
+    input  wire        sram_ack,
+    input  wire [15:0] sram_dout,
+
     input  wire [14:0] scr_dl_addr,
     input  wire [ 7:0] scr_dl_data,
     input  wire        scr_dl_we,
@@ -58,7 +65,7 @@ module wrally2_main (
     wire        FC0, FC1, FC2;
     reg         IPL_n;
     wire [2:0]  fc = {FC2, FC1, FC0};
-    wire        cpu_cen, cpu_cenb;
+    wire        cpu_cen, cpu_cenb, cpu_mid;
 
     fx68k u_cpu (
         .clk(clk), .HALTn(1'b1),
@@ -103,17 +110,24 @@ module wrally2_main (
     wire [15:0] rom_word = prog_data;
 
     wire bus_busy  = cs_rom & rw_rd & ~prog_data_ok;
+    wire sram_wait;
     wire dtack_raw;
     wrally2_cpu_clk u_clk (
         .rst(rst), .clk(clk), .run(game_run),
-        .ASn(ASn), .rom_wait(bus_busy | cpu_hold),
-        .cpu_cen(cpu_cen), .cpu_cenb(cpu_cenb), .tick(cpu_tick),
+        .ASn(ASn), .rom_wait(bus_busy | (sram_wait & rw_rd)), .hold((sram_wait & ~rw_rd) | cpu_hold),
+        .cpu_cen(cpu_cen), .cpu_cenb(cpu_cenb), .tick(cpu_tick), .mid(cpu_mid),
         .DTACKn(dtack_raw)
     );
 
     assign DTACKn = (fc == 3'd7) ? 1'b1 : dtack_raw;
 
     reg [15:0] vregs[0:7];
+`ifdef VERILATOR
+    // the harness's scene mode: vreg sc_vsel = sc_vdata
+    reg        sc_vwe   /*verilator public_flat_rw*/ = 1'b0;
+    reg [2:0]  sc_vsel  /*verilator public_flat_rw*/ = 3'd0;
+    reg [15:0] sc_vdata /*verilator public_flat_rw*/ = 16'd0;
+`endif
     assign vreg0 = vregs[2]; assign vreg1 = vregs[3]; assign vreg2 = vregs[4];
 
     assign flip_screen = 1'b0;
@@ -135,14 +149,14 @@ module wrally2_main (
             cs_rom:   iEdb = rom_word;
             cs_vram:  iEdb = vmem_vram_rdata;
             cs_pal:   iEdb = vmem_pal_rdata;
-            cs_xram:  iEdb = xram_q;
+            cs_xram:  iEdb = sram_q;
 
             cs_vregs: iEdb = vregs[addr[3:1]];
             cs_in0:   iEdb = {in0[15:7], adc1_bit, in0[5:0]};
             cs_in1:   iEdb = in1;
             cs_in2:   iEdb = {in2[15:7], adc2_bit, in2[5:0]};
             cs_in3:   iEdb = in3;
-            cs_wram:  iEdb = wram_q;
+            cs_wram:  iEdb = sram_q;
             cs_shram: iEdb = shram_q;
             cs_sound: iEdb = snd_rdata;
             default:  iEdb = 16'hFFFF;
@@ -163,7 +177,14 @@ module wrally2_main (
             asn_d <= ASn;
 
             if (vblank_irq) irq_pending <= 1'b1;
-            IPL_n <= ~irq_pending;
+            // IPL moves with phi2's clock or after it, never between phi1 and
+            // phi2: where it lands against the phases decides which instruction
+            // takes the IRQ, and a hold of board time (a ROM miss, the SRAM,
+            // the sprite copy, the GAE1) can come between them
+            if (!cpu_mid) IPL_n <= ~irq_pending;
+`ifdef VERILATOR
+            if (sc_vwe) vregs[sc_vsel] <= sc_vdata;
+`endif
 
             if (~ASn) VPAn <= (fc == 3'd7) ? 1'b0 : 1'b1;
             else      VPAn <= 1'b1;
@@ -182,38 +203,44 @@ module wrally2_main (
         end
     end
 
-    reg [7:0] wram_hi[0:16383], wram_lo[0:16383];
-    wire [13:0] wramidx = addr[14:1];
-    wire        ww_hi = wr_ack & ~rw_rd & cs_wram & uds;
-    wire        ww_lo = wr_ack & ~rw_rd & cs_wram & lds;
-    reg  [15:0] wram_q;
+    // One request a bus cycle, once its data strobes are out (a write's come
+    // a phase after AS); `sram_done` until they fall, so a read-modify-write
+    // cycle makes two. The CPU is not clocked meanwhile, as for a ROM miss;
+    // a read's DTACK waits for the data, a write's does not.
+    wire        cs_sram   = cs_wram | cs_xram;
+    wire        sram_need = cs_sram & ~ASn & (uds | lds);
+    reg         sram_done;
+    reg  [15:0] sram_q;
+    assign      sram_wait = sram_need & ~sram_done;
     always @(posedge clk) begin
-        if (ww_hi) wram_hi[wramidx] <= oEdb[15:8];
-        if (ww_lo) wram_lo[wramidx] <= oEdb[7:0];
-        wram_q <= {wram_hi[wramidx], wram_lo[wramidx]};
-    end
-
-    reg [7:0] xram_hi[0:4095], xram_lo[0:4095];
-    wire [11:0] xramidx = addr[12:1];
-    wire        xw_hi = wr_ack & ~rw_rd & cs_xram & uds;
-    wire        xw_lo = wr_ack & ~rw_rd & cs_xram & lds;
-    reg  [15:0] xram_q;
-    always @(posedge clk) begin
-        if (xw_hi) xram_hi[xramidx] <= oEdb[15:8];
-        if (xw_lo) xram_lo[xramidx] <= oEdb[7:0];
-        xram_q <= {xram_hi[xramidx], xram_lo[xramidx]};
+        if (rst) begin
+            sram_req <= 1'b0; sram_done <= 1'b0;
+        end else begin
+            if (ASn || !(uds || lds)) sram_done <= 1'b0;
+            if (!sram_req && sram_wait) begin
+                sram_req  <= 1'b1;
+                sram_we   <= ~rw_rd;
+                sram_addr <= cs_wram ? {3'b000, addr[14:1]} : {5'b00100, addr[12:1]};
+                sram_din  <= oEdb;
+                sram_be   <= {uds, lds};
+            end
+            if (sram_req && sram_ack) begin
+                sram_req  <= 1'b0;
+                sram_done <= 1'b1;
+                sram_q    <= sram_dout;
+            end
+        end
     end
 
     wire        mcu_xrd, mcu_xwr; wire [15:0] mcu_xaddr; wire [7:0] mcu_xdout; wire [7:0] mcu_xdin;
     wire [15:0] mcu_rom_addr; wire mcu_rom_en;
+    reg  [7:0]  mcurom_q;
     wrally2_mcu u_mcu (
         .clk(clk), .rst(rst), .cen(mcu_cen),
-        .rom_addr(mcu_rom_addr), .rom_en(mcu_rom_en), .rom_byte(mcurom_data),
+        .rom_addr(mcu_rom_addr), .rom_en(mcu_rom_en), .rom_byte(mcurom_q),
         .xdata_rd(mcu_xrd), .xdata_wr(mcu_xwr), .xdata_addr(mcu_xaddr),
         .xdata_dout(mcu_xdout), .xdata_din(mcu_xdin)
     );
-    assign mcurom_addr = mcu_rom_addr[14:0];
-    assign mcurom_en   = mcu_rom_en;
 
     wire        mcu_sh    = mcu_xaddr[15];
     wire [13:0] mcu_shidx = mcu_xaddr[14:1];
@@ -236,13 +263,21 @@ module wrally2_main (
         .clk1(clk), .data1(mcu_xdout),  .addr1(mcu_shidx), .we1(mcu_sh_wr_lo), .q1(shram_mcu_lo_q)
     );
 
-    wire [14:0] scridx = mcu_xaddr[14:0];
-    wire [7:0]  scratch_q;
-
-    jtframe_dual_ram #(.AW(15),.DW(8),.SIMFILE("dallas.bin")) u_scratch (
-        .clk0(clk),        .data0(mcu_xdout),   .addr0(scridx),     .we0(mcu_xwr & mcu_scr), .q0(scratch_q),
-        .clk1(scr_dl_clk), .data1(scr_dl_data), .addr1(scr_dl_addr), .we1(scr_dl_we),        .q1()
-    );
+    // The DS5002FP's 32 KB SRAM: its program and, the same bytes, MOVX data
+    // 0000-7fff, as on the board (jlrh kept two copies). Port A the MOVX
+    // side, and the loader's while both CPUs are in reset; port B the
+    // program fetch (jt8051 reads it on cen only).
+    (* ramstyle = "no_rw_check" *) reg [7:0] dsram [0:32767];
+    wire [14:0] dsa_addr = scr_dl_we ? scr_dl_addr : mcu_xaddr[14:0];
+    wire        dsa_we   = scr_dl_we | (mcu_xwr & mcu_scr);
+    wire [7:0]  dsa_d    = scr_dl_we ? scr_dl_data : mcu_xdout;
+    reg  [7:0]  scratch_q;
+    always @(posedge clk) begin
+        if (dsa_we) dsram[dsa_addr] <= dsa_d;
+        scratch_q <= dsram[dsa_addr];
+    end
+    always @(posedge clk) if (mcu_rom_en) mcurom_q <= dsram[mcu_rom_addr[14:0]];
+    wire [14:0] mcurom_addr = mcu_rom_addr[14:0];
 
     assign mcu_xdin = mcu_scr ? scratch_q :
                       (mcu_xaddr[0] ? shram_mcu_lo_q : shram_mcu_hi_q);

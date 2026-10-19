@@ -16,8 +16,9 @@ module wrally2_gae1_sprite #(
     output reg  [14:0] spr_a,
     input  wire [15:0] spr_q,
 
-    output reg  [21:0] rom_a,
-    input  wire [7:0]  d_p0, d_p1, d_p2, d_p3,
+    // a fetch line: tile row half rom_a, plane p in d_line[8p+7:8p]
+    output reg  [20:0] rom_a,
+    input  wire [63:0] d_line,
     input  wire        gfx_ok,
 
     input  wire [9:0]  lb_x,
@@ -28,8 +29,7 @@ module wrally2_gae1_sprite #(
 );
 
     localparam [4:0] IDLE=0, CLR=1, RDW1F=2, RDW0=3, RDW2=4, RDW3=5, SETUP=6,
-                     D5ADR=7, D5RD=8, FSETL=9, FWL=10, FSETL4=11, FWL4=12,
-                     FSETR=13, FWR=14, FSETR4=15, FWR4=16, PWR=17, NEXT=18, DON=19;
+                     D5ADR=7, D5RD=8, FSETL=9, FWL=10, FWR=14, NEXT=18, DON=19;
 
     reg [4:0]  state;
     reg [9:0]  spr_e;
@@ -96,16 +96,14 @@ module wrally2_gae1_sprite #(
     wire       do_write = draw_busy && pen_ok && xin;
     reg        dw_s1, sh_s1; reg [4:0] pen_s1; reg [11:0] idx_s1; reg [LBAW-1:0] wa_s1;
     reg        dw_s2; reg [16:0] wd_s2; reg [LBAW-1:0] wa_s2;
-    reg        clr_we_q; reg [LBAW-1:0] clr_wa_q;
+    reg        clr_we_q; reg [LBAW-1:0] clr_wa_q, lbx_prev;
     wire [16:0] lb_cur  = is0w ? lb0_rq : lb1_rq;
     wire [16:0] lb_new  = sh_s1
         ? {1'b1, pen_s1[3:0], (lb_cur[16] ? lb_cur[11:0] : 12'd0)}
         : {1'b1, 4'd0, (idx_s1 | {7'b0, pen_s1})};
 
-    wire [21:0] rom_a_l  = {1'b0, number[15:0], 1'b0, gpy};
-    wire [21:0] rom_a_l4 = {1'b1, number[15:0], 1'b0, gpy};
-    wire [21:0] rom_a_r  = {1'b0, number[15:0], 1'b1, gpy};
-    wire [21:0] rom_a_r4 = {1'b1, number[15:0], 1'b1, gpy};
+    wire [20:0] rom_a_l  = {number[15:0], 1'b0, gpy};
+    wire [20:0] rom_a_r  = {number[15:0], 1'b1, gpy};
 
     wire [8:0]  rely    = (line_r - sy0) & 9'h1ff;
     wire        covered = (rely < {ysize, 4'b0});
@@ -119,7 +117,10 @@ module wrally2_gae1_sprite #(
     always @(*) begin
         case (state)
             CLR:   spr_a = base_word + 15'd1;
-            RDW1F: spr_a = base_word + {3'b0, spr_e, 2'b00};
+            // an entry not on this line costs one clock: the next one's
+            // word 1 is asked for while this one's is looked at
+            RDW1F: spr_a = proceed_w ? base_word + {3'b0, spr_e, 2'b00}
+                                     : base_word + {3'b0, (spr_e + 10'd1), 2'b01};
             RDW0:  spr_a = base_word + {3'b0, spr_e, 2'b10};
             RDW2:  spr_a = base_word + {3'b0, spr_e, 2'b11};
             D5ADR: spr_a = d5_addr;
@@ -136,12 +137,17 @@ module wrally2_gae1_sprite #(
         dw_s1 <= do_write; sh_s1 <= shadow_d; pen_s1 <= pen; idx_s1 <= idx_d; wa_s1 <= lb_wa[LBAW-1:0];
         dw_s2 <= dw_s1;    wd_s2 <= lb_new;       wa_s2  <= wa_s1;
 
-        clr_we_q <= (state==CLR); clr_wa_q <= clr_i[LBAW-1:0];
+        // The buffer on show is cleared behind the pixel it has just shown
+        // (jlrh cleared the whole line before drawing it: 384 clocks a line)
+        lbx_prev <= lb_x[LBAW-1:0];
+        clr_wa_q <= lbx_prev;
+        clr_we_q <= lb_x[LBAW-1:0] != lbx_prev;
 
-        if (clr_we_q) begin
-            if (is0w) lb0[clr_wa_q] <= 17'd0; else lb1[clr_wa_q] <= 17'd0;
-        end else if (dw_s2) begin
+        if (dw_s2) begin
             if (is0w) lb0[wa_s2] <= wd_s2; else lb1[wa_s2] <= wd_s2;
+        end
+        if (clr_we_q) begin
+            if (is0w) lb1[clr_wa_q] <= 17'd0; else lb0[clr_wa_q] <= 17'd0;
         end
     end
 
@@ -160,7 +166,7 @@ module wrally2_gae1_sprite #(
     integer c_clr=0, c_fetch=0, c_pwr=0, c_iter=0, c_cells=0;
     always @(posedge clk) if (ce && !start) begin
         if (state==CLR) c_clr <= c_clr+1;
-        else if (state>=FSETL && state<=FWR4) c_fetch <= c_fetch+1;
+        else if (state>=FSETL && state<=FWR) c_fetch <= c_fetch+1;
         else if (state!=IDLE && state!=DON) c_iter <= c_iter+1;
         if (draw_busy) c_pwr <= c_pwr+1;
         if (draw_start) c_cells <= c_cells+1;
@@ -185,16 +191,15 @@ module wrally2_gae1_sprite #(
             line_r <= line; clr_i <= 10'd0; busy <= 1'b1; wbank_r <= wbank; state <= CLR;
         end else case (state)
             IDLE: ;
-            CLR: begin
-                clr_i <= clr_i + 1'b1;
-                if (clr_i == (twin ? 10'd767 : 10'd383)) begin spr_e <= 10'd0; state <= RDW1F; end
-            end
+            CLR: begin spr_e <= 10'd0; state <= RDW1F; end
 
             RDW1F: begin
                 sy0   <= spr_q[8:0]; en_r <= spr_q[9];
                 yflip <= spr_q[10]; xflip <= spr_q[11];
                 ysize <= {1'b0, spr_q[15:12]} + 5'd1;
-                state <= proceed_w ? RDW0 : NEXT;
+                if (proceed_w) state <= RDW0;
+                else if (spr_e < 10'd511) spr_e <= spr_e + 10'd1;
+                else state <= DON;
             end
             RDW0: begin
                 bank_hi <= spr_q[8:0]; color_base <= spr_q[15:9];
@@ -228,17 +233,13 @@ module wrally2_gae1_sprite #(
 
             FSETL:  begin rom_a <= rom_a_l;  state <= FWL; end
 
-            FWL:    if (gfx_ok) begin gl0<=d_p0; gl1<=d_p1; gl2<=number[15]?8'd0:d_p2; gl3<=number[15]?8'd0:d_p3; rom_a<=rom_a_l4; state<=FSETL4; end
-            FSETL4: state <= FWL4;
-            FWL4:   if (gfx_ok) begin gl4<=d_p0; rom_a<=rom_a_r; state<=FSETR; end
-            FSETR:  state <= FWR;
-            FWR:    if (gfx_ok) begin gr0<=d_p0; gr1<=d_p1; gr2<=number[15]?8'd0:d_p2; gr3<=number[15]?8'd0:d_p3; rom_a<=rom_a_r4; state<=FSETR4; end
-            FSETR4: state <= FWR4;
-
-            FWR4:   if (gfx_ok && !draw_busy) begin
-                       gr4<=d_p0;
+            FWL:    if (gfx_ok) begin
+                       gl0<=d_line[7:0]; gl1<=d_line[15:8]; gl2<=d_line[23:16]; gl3<=d_line[31:24]; gl4<=d_line[39:32];
+                       rom_a<=rom_a_r; state<=FWR;
+                   end
+            FWR:    if (gfx_ok && !draw_busy) begin
                        gld0<=gl0; gld1<=gl1; gld2<=gl2; gld3<=gl3; gld4<=gl4;
-                       grd0<=gr0; grd1<=gr1; grd2<=gr2; grd3<=gr3; grd4<=d_p0;
+                       grd0<=d_line[7:0]; grd1<=d_line[15:8]; grd2<=d_line[23:16]; grd3<=d_line[31:24]; grd4<=d_line[39:32];
                        cx0_d   <= $signed({2'b0, bx_cell}) + spradj;
                        idx_d   <= cell_idx; shadow_d <= cell_shadow; xflip_d <= xflip; xoff_d <= xoff_cell;
                        draw_start <= 1'b1;
@@ -254,6 +255,28 @@ module wrally2_gae1_sprite #(
             default: state <= IDLE;
         endcase
     end
+
+`ifdef VERILATOR
+    // For the harness: the clocks each line takes from start to done (0xffff
+    // when the next start cuts it short) and the cells it drew.
+    reg [15:0] m_cyc = 16'd0, m_cells = 16'd0;
+    reg [15:0] m_last  /*verilator public_flat_rd*/ = 16'd0;
+    reg [15:0] m_ncell /*verilator public_flat_rd*/ = 16'd0;
+    reg        m_done  /*verilator public_flat_rd*/ = 1'b0;
+    always @(posedge clk) begin
+        m_done <= 1'b0;
+        if (start) begin
+            if (state != IDLE) begin m_last <= 16'hffff; m_ncell <= m_cells; m_done <= 1'b1; end
+            m_cyc <= 16'd0; m_cells <= 16'd0;
+        end else if (state != IDLE) begin
+            m_cyc <= m_cyc + 16'd1;
+            if (draw_start) m_cells <= m_cells + 16'd1;
+            if (state == DON && !draw_busy && !dw_s1 && !dw_s2) begin
+                m_last <= m_cyc; m_ncell <= m_cells; m_done <= 1'b1;
+            end
+        end
+    end
+`endif
 
     // synthesis translate_off
     integer k;

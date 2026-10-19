@@ -23,9 +23,10 @@ module wrally2_gae1_sound #(
     input  wire [15:0] cpu_wdata,
     output wire [15:0] cpu_rdata,
 
-    output reg  [21:0] rom_addr,
+    // a byte of the gfx region: MAME's bank + end + position
+    output reg  [23:0] rom_addr,
     output reg         rom_cs,
-    input  wire [31:0] rom_data,
+    input  wire [7:0]  rom_data,
     input  wire        rom_ok,
 
     output reg signed [15:0] snd_l, snd_r,
@@ -75,16 +76,9 @@ module wrally2_gae1_sound #(
     reg signed [15:0] chl, chr;
     reg signed [31:0] accl, accr;
 
-    function [7:0] selbyte(input [31:0] d, input [1:0] bk);
-        case (bk)
-            2'd0: selbyte = d[15:8];
-            2'd1: selbyte = d[7:0];
-            2'd2: selbyte = d[31:24];
-            2'd3: selbyte = d[23:16];
-        endcase
-    endfunction
-
-    wire [23:0] saddr = endpos + {8'b0, rem};
+    // set_bank_offsets(0, 0x200000, 0, 0): bank 1 is the second plane,
+    // the others the first
+    wire [23:0] saddr = (bank == 2'd1 ? 24'h200000 : 24'h0) + endpos + {8'b0, rem};
 
     integer i;
     always @(posedge clk) begin
@@ -130,9 +124,9 @@ module wrally2_gae1_sound #(
                     st <= A1WAIT;
                 end
                 A1WAIT: begin
-                    rom_addr <= saddr[21:0]; rom_cs <= 1'b1;
+                    rom_addr <= saddr; rom_cs <= 1'b1;
                     if (rom_ok) begin
-                        data1 <= selbyte(rom_data, bank);
+                        data1 <= rom_data;
                         rom_cs <= 1'b0;
                         st <= VL;
                     end
@@ -155,9 +149,9 @@ module wrally2_gae1_sound #(
                     end
                 end
                 A2WAIT: begin
-                    rom_addr <= saddr[21:0]; rom_cs <= 1'b1;
+                    rom_addr <= saddr; rom_cs <= 1'b1;
                     if (rom_ok) begin
-                        vol_a <= {vr, selbyte(rom_data, bank)};
+                        vol_a <= {vr, rom_data};
                         rom_cs <= 1'b0;
                         rem <= rem - 16'd1;
                         st <= VR;

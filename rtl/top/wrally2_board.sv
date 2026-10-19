@@ -4,21 +4,22 @@
 // Platform-neutral: no pins, no framework. The Pocket shell (pocket/) and
 // the simulation harness (sim/wrally2/) both host this module. It replaces
 // jlrh's JTFRAME top (jtwrally2_game.v) and keeps what is under it as jlrh
-// wrote it, but for the 68000's clock (wrally2_cpu_clk: board time, below)
-// and the ADC's reset (wrally2_adc), both set by the bus trace against MAME:
+// wrote it, but where the bus trace and the frames against MAME, or the
+// Pocket's memories, have changed it:
 //
-//   MC68000 @ 13 MHz      wrally2_main: fx68k, the bus, work/extra/shared RAM
+//   MC68000 @ 13 MHz      wrally2_main: fx68k, the bus, the shared RAM; work
+//                         and extra RAM on the platform's SRAM
 //   DS5002FP @ 13 MHz     wrally2_mcu (jt8051; mc8051 without WR2_JT8051)
-//                         inside wrally2_main; its program here, filled
-//                         from the ROM image
-//   GAE1 video            wrally2_video_top, the left screen (index 0)
-//   GAE1 sound            wrally2_gae1_sound, 7 channels; the right output
+//                         inside wrally2_main, with its one 32 KB SRAM,
+//                         filled from the ROM image
+//   GAE1 video            wrally2_video_top, the left screen only (tilemap 0,
+//                         the monitor-0 sprites); wrally2_vmem, one VRAM,
+//                         the sprite buffer and the palette
+//   GAE1 sound            wrally2_gae1_sound, 7 channels
 //
-// SDRAM line ports (64-bit lines, INTERFACES.md): 0 the 68000's program,
-// 1 tilemap 0, 2 sprites (the engine runs at 96 MHz), 3 sound. jlrh's
-// fetchers ask for 32-bit words of his own layout – planes {2,3,0,1} of a
-// tile row half, or plane 4 in every byte when address bit 21 is set – and
-// both halves of that are one fetch line here, so the word is cut from it.
+// SDRAM line ports (64-bit lines, in the layout tools/pocket/build_rom.py
+// writes): 0 the 68000's program, 1 tilemap 0, 2 sprites, 3 sound. A tile
+// row half – all five planes of eight pixels – is one line.
 
 `timescale 1ns/1ps
 `default_nettype none
@@ -48,7 +49,6 @@ module wrally2_board #(
     parameter int unsigned MCU_LAG  = 0
 )(
     input  wire        clk,            // 48 MHz
-    input  wire        clk96,          // 96 MHz, same PLL: the sprite engine
     input  wire        rst,            // core reset; the board adds !rom_loaded
 
     // ROM read ports (SDRAM controller, slow side)
@@ -57,9 +57,19 @@ module wrally2_board #(
     input  wire [NP-1:0]             rom_ack,
     input  wire [NP-1:0][63:0]       rom_dout,
 
+    // Work RAM and extra RAM: one SRAM word port, req held until a one-clock
+    // ack (dout valid with it), the next req no sooner than the clock after.
+    output wire        sram_req,
+    output wire        sram_we,
+    output wire [16:0] sram_addr,
+    output wire [15:0] sram_din,
+    output wire [1:0]  sram_be,         // [1] the upper byte
+    input  wire        sram_ack,
+    input  wire [15:0] sram_dout,
+
     // Loader snoop: the DS5002FP's SRAM image (bytes 0x100000-0x107fff).
     // dl_wr no more often than every other clock (each word is two byte
-    // writes into jlrh's scratch RAM).
+    // writes into the DS5002's RAM).
     input  wire        dl_wr,
     input  wire [24:1] dl_addr,
     input  wire [15:0] dl_data,
@@ -68,10 +78,11 @@ module wrally2_board #(
     // Video, the left screen: 384 x 240 of a 512 x 264 frame
     output wire        ce_pix,
     output wire        hs, vs, hblank, vblank,
-    output wire [4:0]  r, g, b,
+    output wire [7:0]  r, g, b,        // MAME's palette: pal5bit, shadow/highlight steps
 
-    // Audio: the GAE1's right output (cabinet 1), 7812.5 Hz
-    output wire signed [15:0] snd,
+    // Audio: the GAE1's two outputs, 7812.5 Hz (MAME routes the first to the
+    // right speaker, the second to the left)
+    output wire signed [15:0] snd_l, snd_r,
     output wire        snd_sample,
 
     // Inputs, active high. p1/p2 = {b2, b1, up, down, left, right}.
@@ -143,7 +154,9 @@ always @(posedge clk) begin
     end
 end
 wire mcu_cen  = (cpu_tick & mcu_lag == 8'd0) | mcu_extra;
-wire cpu_hold = snd_busy | mcu_owed != 8'd0 | mcu_extra;
+// The sprite buffer's copy at vblank holds board time too (wrally2_vmem).
+wire vram_copying;
+wire cpu_hold = snd_busy | mcu_owed != 8'd0 | mcu_extra | vram_copying;
 
 // board_irq is the tick's own clock, not a register after it: wrally2_main
 // takes it to IPL in two clocks, so IPL always changes after this tick's phi2
@@ -189,19 +202,15 @@ wrally2_romport #(.AW(SDR_AW)) u_rp_main (
 wire [15:0] main_sw   = main_line[16*main_addr[2:1] +: 16];
 wire [15:0] main_data = {main_sw[7:0], main_sw[15:8]};
 
-// jlrh's word at address a: a[21] = 0, planes {2,3,0,1} of row half
-// a[20:0]; a[21] = 1, plane 4 of it in every byte. Fetch line o holds
-// plane p in bits [8p+7:8p].
-function automatic [SDR_AW:1] gfx_line(input [21:0] a);
-    gfx_line = W_GFX + {a[20:0], 2'b00};
-endfunction
-function automatic [31:0] gfx_word(input [63:0] l, input a21);
-    gfx_word = a21 ? {4{l[39:32]}} : {l[23:16], l[31:24], l[7:0], l[15:8]};
+// Tile row half o is the line at W_GFX + 4o; a sample byte at gfx offset A
+// is plane A >> 21 of line A & 0x1fffff.
+function automatic [SDR_AW:1] gfx_line(input [20:0] o);
+    gfx_line = W_GFX + {o, 2'b00};
 endfunction
 
-wire [21:0] tm0_a;   wire tm0_ok;   wire [63:0] tm0_line;
-wire [21:0] spr_ra;  wire spr_ok;   wire [63:0] spr_line;
-wire [21:0] snd_ra;  wire snd_cs;   wire snd_ok;  wire [63:0] snd_line;
+wire [20:0] tm0_a;   wire tm0_ok;   wire [63:0] tm0_line;
+wire [20:0] spr_ra;  wire spr_ok;   wire [63:0] spr_line;
+wire [23:0] snd_ra;  wire snd_cs;   wire snd_ok;  wire [63:0] snd_line;
 
 wrally2_romport #(.AW(SDR_AW)) u_rp_tm0 (
     .clk(clk), .rst(cpu_rst),
@@ -215,33 +224,16 @@ wrally2_romport #(.AW(SDR_AW)) u_rp_spr (
 );
 wrally2_romport #(.AW(SDR_AW)) u_rp_snd (
     .clk(clk), .rst(cpu_rst),
-    .cs(snd_cs), .line(gfx_line(snd_ra)), .ok(snd_ok), .data(snd_line),
+    .cs(snd_cs), .line(gfx_line(snd_ra[20:0])), .ok(snd_ok), .data(snd_line),
     .rom_req(rom_req[3]), .rom_addr(rom_addr[3]), .rom_ack(rom_ack[3]), .rom_dout(rom_dout[3])
 );
+wire [7:0] snd_byte = snd_ra[23:21] <= 3'd4 ? snd_line[8*snd_ra[23:21] +: 8] : 8'd0;
 
-// ================================================================ DS5002FP program
-// jlrh's board reads the DS5002's code from a 32 KB PROM and its MOVX data
-// from a separate copy (the scratch RAM in wrally2_main); both are filled
-// from the image's ds5002 slot as the loader passes.
+// ================================================================ DS5002FP SRAM
+// Filled from the image's ds5002 slot as the loader passes, a byte a clock:
+// the low byte on the snoop's clock, the high byte on the next.
 wire        dl_mcu = dl_wr && dl_addr >= W_DS5002 && dl_addr < W_DS5002 + 24'h4000;
 wire [13:0] dl_mcu_w = dl_addr[14:1];
-
-reg  [15:0] mcu_prog [0:16383];
-wire [14:0] mcurom_addr;
-wire        mcurom_en;      // jt8051 reads its PROM on cen only, mc8051 always
-reg  [15:0] mcu_prog_q;
-reg         mcu_prog_a0;
-always @(posedge clk) begin
-    if (dl_mcu) mcu_prog[dl_mcu_w] <= dl_data;
-    if (mcurom_en) begin
-        mcu_prog_q  <= mcu_prog[mcurom_addr[14:1]];
-        mcu_prog_a0 <= mcurom_addr[0];
-    end
-end
-wire [7:0] mcurom_data = mcu_prog_a0 ? mcu_prog_q[15:8] : mcu_prog_q[7:0];
-
-// The scratch copy takes bytes: the low byte on the snoop's clock, the high
-// byte on the next.
 reg        scr_hi_pend = 1'b0;
 reg [13:0] scr_hi_w;
 reg [7:0]  scr_hi_d;
@@ -261,7 +253,6 @@ wire [15:0] vmem_wdata;
 wire [15:0] cpu_vram_rd, cpu_pal_rd;
 wire [15:0] vreg0, vreg1, vreg2;
 wire        sndreg_cs, sndreg_we; wire [15:0] snd_rdata;
-wire        vblank_irq;
 
 wrally2_main u_main (
     .clk(clk), .rst(cpu_rst), .game_run(~pause),
@@ -276,59 +267,53 @@ wrally2_main u_main (
     .vmem_vram_rdata(cpu_vram_rd), .vmem_pal_rdata(cpu_pal_rd),
     .vreg0(vreg0), .vreg1(vreg1), .vreg2(vreg2),
     .sndreg_cs(sndreg_cs), .sndreg_we(sndreg_we), .snd_rdata(snd_rdata),
-    .cpu_tick(cpu_tick), .cpu_hold(cpu_hold), .mcu_cen(mcu_cen), .mcurom_addr(mcurom_addr), .mcurom_en(mcurom_en), .mcurom_data(mcurom_data),
-    .scr_dl_clk(clk), .scr_dl_addr(scr_dl_addr), .scr_dl_data(scr_dl_data), .scr_dl_we(scr_dl_we),
+    .cpu_tick(cpu_tick), .cpu_hold(cpu_hold), .mcu_cen(mcu_cen),
+    .sram_req(sram_req), .sram_we(sram_we), .sram_addr(sram_addr), .sram_din(sram_din),
+    .sram_be(sram_be), .sram_ack(sram_ack), .sram_dout(sram_dout),
+    .scr_dl_addr(scr_dl_addr), .scr_dl_data(scr_dl_data), .scr_dl_we(scr_dl_we),
     .dbg_mcu_pcmax(), .dbg_mcu_fetch(), .dbg_mcuw(), .dbg_mcu_scrw(), .dbg_key()
 );
 
 // ================================================================ sound
-wire signed [15:0] snd_l, snd_r;
 wrally2_gae1_sound #(.TICKDIV(1664)) u_snd (
     .clk(clk), .rst(cpu_rst), .tick(cpu_tick), .busy(snd_busy),
     .cs_sound(sndreg_cs), .cpu_aw(vmem_addr[7:1]), .cpu_we(sndreg_we),
     .cpu_uds(vmem_uds), .cpu_lds(vmem_lds), .cpu_wdata(vmem_wdata), .cpu_rdata(snd_rdata),
-    .rom_addr(snd_ra), .rom_cs(snd_cs), .rom_data(gfx_word(snd_line, snd_ra[21])), .rom_ok(snd_ok),
+    .rom_addr(snd_ra), .rom_cs(snd_cs), .rom_data(snd_byte), .rom_ok(snd_ok),
     .snd_l(snd_l), .snd_r(snd_r), .sample(snd_sample)
 );
-assign snd = snd_r;
 
 // ================================================================ video
-wire [13:0] tp0_idx, tp1_idx; wire [31:0] tp0_q, tp1_q;
-wire [14:0] wrd_a;  wire [15:0] wrd_q;
-wire [14:0] spr_a;  wire [15:0] spr_q;
-wire [14:0] spr2_a; wire [15:0] spr2_q;
-wire [11:0] pal_a;  wire [15:0] pal_q;
+wire [13:0] tp0_idx; wire tp0_rd; wire [31:0] tp0_q;
+wire [14:0] wrd_a;   wire [15:0] wrd_q;
+wire [14:0] spr_a;   wire [15:0] spr_q;
+wire [11:0] pal_a;   wire [15:0] pal_q;
 wrally2_vmem u_vmem (
-    .clk(clk), .clk96(clk96),
+    .clk(clk), .rst(cpu_rst),
     .cpu_addr(vmem_addr), .cpu_uds(vmem_uds), .cpu_lds(vmem_lds), .cpu_we(vmem_we),
     .cs_vram(vmem_cs_vram), .cs_pal(vmem_cs_pal),
     .cpu_wdata(vmem_wdata),
     .cpu_vram_rdata(cpu_vram_rd), .cpu_pal_rdata(cpu_pal_rd),
-    .tp0_idx(tp0_idx), .tp0_q(tp0_q), .tp1_idx(tp1_idx), .tp1_q(tp1_q),
-    .wrd_a(wrd_a), .wrd_q(wrd_q), .spr_a(spr_a), .spr_q(spr_q),
-    .spr2_a(spr2_a), .spr2_q(spr2_q),
+    .tp_rd(tp0_rd), .tp_idx(tp0_idx), .tp_q(tp0_q),
+    .wrd_a(wrd_a), .wrd_q(wrd_q),
+    .snap(board_irq), .copying(vram_copying), .spr_a(spr_a), .spr_q(spr_q),
     .pal_a(pal_a), .pal_q(pal_q)
 );
 
-// The video's own vblank IRQ is left unused: IRQ 6 is board time's (above).
-// Tilemap 1 and the second sprite engine belong to the right screen: their
-// fetches are never answered, as in jlrh's one-screen modes.
-wire [21:0] tm1_a, spr2_ra;
+// The video's own vblank IRQ is left unused: IRQ 6 is board time's (above),
+// and its tick is also the instant the sprite buffer is taken.
+wire vblank_irq;
 wrally2_video_top u_video (
-    .clk(clk), .clk96(clk96), .rst(rst), .ce_pix(ce_pix),
-    .index(1'b0), .twin(1'b0),
-    .vreg0(vreg0), .vreg1(vreg1), .vreg2(vreg2),
-    .tp0_idx(tp0_idx), .tp0_q(tp0_q), .tp1_idx(tp1_idx), .tp1_q(tp1_q),
+    .clk(clk), .rst(rst), .ce_pix(ce_pix),
+    .vreg0(vreg0), .vreg1(vreg1),
+    .tp0_idx(tp0_idx), .tp0_rd(tp0_rd), .tp0_q(tp0_q),
     .wrd_a(wrd_a), .wrd_q(wrd_q), .spr_a(spr_a), .spr_q(spr_q),
-    .spr2_a(spr2_a), .spr2_q(spr2_q), .pal_a(pal_a), .pal_q(pal_q),
-    .rom_a0(tm0_a),  .gfx0_data(gfx_word(tm0_line, tm0_a[21])), .gfx0_ok(tm0_ok),
-    .rom_a1(tm1_a),  .gfx1_data(32'd0), .gfx1_ok(1'b0),
-    .rom_as(spr_ra), .gfxs_data(gfx_word(spr_line, spr_ra[21])), .gfxs_ok(spr_ok),
-    .rom_as2(spr2_ra), .gfxs2_data(32'd0), .gfxs2_ok(1'b0),
+    .pal_a(pal_a), .pal_q(pal_q),
+    .rom_a0(tm0_a), .gfx0_line(tm0_line), .gfx0_ok(tm0_ok),
+    .rom_as(spr_ra), .gfxs_line(spr_line), .gfxs_ok(spr_ok),
     .vga_r(r), .vga_g(g), .vga_b(b),
     .hsync(hs), .vsync(vs), .hblank(hblank), .vblank(vblank), .de(),
-    .vblank_irq(vblank_irq),
-    .cpu_vwe(vmem_we & vmem_cs_vram), .cpu_vaddr(vmem_addr[14:0])
+    .vblank_irq(vblank_irq)
 );
 
 // ================================================================ harness probes

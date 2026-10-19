@@ -3,7 +3,7 @@
 module wrally2_gae1_palette (
     input  wire [15:0] pal_word,
     input  wire [3:0]  variant,
-    output wire [4:0]  r, g, b
+    output wire [7:0]  r, g, b
 );
 
     wire [4:0] r5 = pal_word[14:10];
@@ -36,15 +36,16 @@ module wrally2_gae1_palette (
     endfunction
     wire signed [8:0] a = adj(variant);
 
-    function [4:0] adjclamp;
+    // MAME's palette_w: pal5bit, then the variant's step, clamped to 0..255
+    function [7:0] adjclamp;
         input [7:0] c8;
         input signed [8:0] off;
         reg signed [9:0] s;
         begin
             s = $signed({2'b0, c8}) + off;
-            if (s < 0)            adjclamp = 5'd0;
-            else if (s > 10'sd255) adjclamp = 5'd31;
-            else                  adjclamp = s[7:3];
+            if (s < 0)            adjclamp = 8'd0;
+            else if (s > 10'sd255) adjclamp = 8'd255;
+            else                  adjclamp = s[7:0];
         end
     endfunction
 

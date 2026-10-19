@@ -1,151 +1,174 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// World Rally 2 (Pocket) — the GAE1's video memories, one screen.
+//
+// jlrh's board kept six copies of the 64 KB video RAM (one per reader) and
+// two of the palette; the Pocket has room for two. So:
+//
+//   VRAM           64 KB, written and read by the 68000 on one port; the
+//                  other port is the video's: the tilemap's tile pairs, the
+//                  scroll words, and the copy below. Four banks of words
+//                  (bank = word address [1:0]), so that port reads a row of
+//                  four words at once.
+//   sprite buffer  64 KB, the VRAM as it stood at vblank (`snap`, the
+//                  tick of IRQ 6): what MAME's BUFFERED_SPRITERAM16 draws
+//                  from, picture N's sprites from vblank N - 1's VRAM. The
+//                  copy takes 8,192 rows; `copying` holds board time
+//                  meanwhile, so the 68000 sees it done in an instant, as
+//                  MAME's is.
+//   palette        8 KB, the 68000 on one port, the pixel on the other.
+//
+// The video port goes first to the tilemap (tp_rd, a tile's two words for
+// the next clock), then to the scroll reader when its address has moved
+// (or always while no copy runs), then to the copy.
+
+`timescale 1ns/1ps
 `default_nettype none
 
 module wrally2_vmem (
-    input  wire        clk,
-    input  wire        clk96,
+    input  wire        clk,             // 48 MHz
+    input  wire        rst,
 
-    input  wire [15:0] cpu_addr,
+    // the 68000
+    input  wire [15:0] cpu_addr,        // byte address within the window
     input  wire        cpu_uds, cpu_lds,
     input  wire        cpu_we,
     input  wire        cs_vram,
     input  wire        cs_pal,
     input  wire [15:0] cpu_wdata,
-    output reg  [15:0] cpu_vram_rdata,
+    output wire [15:0] cpu_vram_rdata,
     output reg  [15:0] cpu_pal_rdata,
 
-    input  wire [13:0] tp0_idx,
-    output reg  [31:0] tp0_q,
-    input  wire [13:0] tp1_idx,
-    output reg  [31:0] tp1_q,
+    // the tilemap: words 2i and 2i+1 for tp_rd's clock, in tp_q the next
+    input  wire        tp_rd,
+    input  wire [13:0] tp_idx,
+    output wire [31:0] tp_q,
+    // the scroll reader: wrd_q holds the last word read at wrd_a
     input  wire [14:0] wrd_a,
-    output wire [15:0] wrd_q,
+    output reg  [15:0] wrd_q,
+
+    // the sprite buffer
+    input  wire        snap,
+    output wire        copying,
     input  wire [14:0] spr_a,
     output wire [15:0] spr_q,
-    input  wire [14:0] spr2_a,
-    output wire [15:0] spr2_q,
+
+    // the palette, for the pixel
     input  wire [11:0] pal_a,
     output reg  [15:0] pal_q
 );
 
-    (* ramstyle = "no_rw_check" *) reg [7:0] ce_hi[0:16383], ce_lo[0:16383], co_hi[0:16383], co_lo[0:16383];
-
-    (* ramstyle = "no_rw_check" *) reg [7:0] t0e_hi[0:16383], t0e_lo[0:16383], t0o_hi[0:16383], t0o_lo[0:16383];
-
-    (* ramstyle = "no_rw_check" *) reg [7:0] t1e_hi[0:16383], t1e_lo[0:16383], t1o_hi[0:16383], t1o_lo[0:16383];
-
-    (* ramstyle = "no_rw_check" *) reg [7:0] we_hi[0:16383], we_lo[0:16383], wo_hi[0:16383], wo_lo[0:16383];
-
-    (* ramstyle = "no_rw_check" *) reg [7:0] se_hi[0:16383], se_lo[0:16383], so_hi[0:16383], so_lo[0:16383];
-
-    (* ramstyle = "no_rw_check" *) reg [7:0] s2e_hi[0:16383], s2e_lo[0:16383], s2o_hi[0:16383], s2o_lo[0:16383];
-
-    wire        par   = cpu_addr[1];
-    wire [13:0] hidx  = cpu_addr[15:2];
-    wire vw_e_hi = cpu_we & cs_vram & ~par & cpu_uds;
-    wire vw_e_lo = cpu_we & cs_vram & ~par & cpu_lds;
-    wire vw_o_hi = cpu_we & cs_vram &  par & cpu_uds;
-    wire vw_o_lo = cpu_we & cs_vram &  par & cpu_lds;
-    wire        w_par  = wrd_a[0];
-    wire [13:0] w_hidx = wrd_a[14:1];
-    wire        s_par  = spr_a[0];
-    wire [13:0] s_hidx = spr_a[14:1];
-    wire        s2_par  = spr2_a[0];
-    wire [13:0] s2_hidx = spr2_a[14:1];
-
-    always @(posedge clk) begin
-        if (vw_e_hi) ce_hi[hidx]<=cpu_wdata[15:8];
-        if (vw_e_lo) ce_lo[hidx]<=cpu_wdata[7:0];
-        if (vw_o_hi) co_hi[hidx]<=cpu_wdata[15:8];
-        if (vw_o_lo) co_lo[hidx]<=cpu_wdata[7:0];
-        cpu_vram_rdata <= par ? {co_hi[hidx], co_lo[hidx]} : {ce_hi[hidx], ce_lo[hidx]};
-    end
-    always @(posedge clk) begin
-        if (vw_e_hi) t0e_hi[hidx]<=cpu_wdata[15:8];
-        if (vw_e_lo) t0e_lo[hidx]<=cpu_wdata[7:0];
-        if (vw_o_hi) t0o_hi[hidx]<=cpu_wdata[15:8];
-        if (vw_o_lo) t0o_lo[hidx]<=cpu_wdata[7:0];
-        tp0_q <= {t0e_hi[tp0_idx], t0e_lo[tp0_idx], t0o_hi[tp0_idx], t0o_lo[tp0_idx]};
-    end
-    always @(posedge clk) begin
-        if (vw_e_hi) t1e_hi[hidx]<=cpu_wdata[15:8];
-        if (vw_e_lo) t1e_lo[hidx]<=cpu_wdata[7:0];
-        if (vw_o_hi) t1o_hi[hidx]<=cpu_wdata[15:8];
-        if (vw_o_lo) t1o_lo[hidx]<=cpu_wdata[7:0];
-        tp1_q <= {t1e_hi[tp1_idx], t1e_lo[tp1_idx], t1o_hi[tp1_idx], t1o_lo[tp1_idx]};
-    end
-
-    reg [7:0] we_hi_q, we_lo_q, wo_hi_q, wo_lo_q; reg w_par_q;
-    always @(posedge clk) begin
-        if (vw_e_hi) we_hi[hidx]<=cpu_wdata[15:8];
-        if (vw_e_lo) we_lo[hidx]<=cpu_wdata[7:0];
-        if (vw_o_hi) wo_hi[hidx]<=cpu_wdata[15:8];
-        if (vw_o_lo) wo_lo[hidx]<=cpu_wdata[7:0];
-        we_hi_q <= we_hi[w_hidx]; we_lo_q <= we_lo[w_hidx];
-        wo_hi_q <= wo_hi[w_hidx]; wo_lo_q <= wo_lo[w_hidx];
-        w_par_q <= w_par;
-    end
-    assign wrd_q = w_par_q ? {wo_hi_q, wo_lo_q} : {we_hi_q, we_lo_q};
-
-    reg [7:0] se_hi_q, se_lo_q, so_hi_q, so_lo_q; reg s_par_q;
-    always @(posedge clk) begin
-        if (vw_e_hi) se_hi[hidx]<=cpu_wdata[15:8];
-        if (vw_e_lo) se_lo[hidx]<=cpu_wdata[7:0];
-        if (vw_o_hi) so_hi[hidx]<=cpu_wdata[15:8];
-        if (vw_o_lo) so_lo[hidx]<=cpu_wdata[7:0];
-    end
-    always @(posedge clk96) begin
-        se_hi_q <= se_hi[s_hidx]; se_lo_q <= se_lo[s_hidx];
-        so_hi_q <= so_hi[s_hidx]; so_lo_q <= so_lo[s_hidx];
-        s_par_q <= s_par;
-    end
-    assign spr_q = s_par_q ? {so_hi_q, so_lo_q} : {se_hi_q, se_lo_q};
-
-    reg [7:0] s2e_hi_q, s2e_lo_q, s2o_hi_q, s2o_lo_q; reg s2_par_q;
-    always @(posedge clk) begin
-        if (vw_e_hi) s2e_hi[hidx]<=cpu_wdata[15:8];
-        if (vw_e_lo) s2e_lo[hidx]<=cpu_wdata[7:0];
-        if (vw_o_hi) s2o_hi[hidx]<=cpu_wdata[15:8];
-        if (vw_o_lo) s2o_lo[hidx]<=cpu_wdata[7:0];
-    end
-    always @(posedge clk96) begin
-        s2e_hi_q <= s2e_hi[s2_hidx]; s2e_lo_q <= s2e_lo[s2_hidx];
-        s2o_hi_q <= s2o_hi[s2_hidx]; s2o_lo_q <= s2o_lo[s2_hidx];
-        s2_par_q <= s2_par;
-    end
-    assign spr2_q = s2_par_q ? {s2o_hi_q, s2o_lo_q} : {s2e_hi_q, s2e_lo_q};
-
-    reg [7:0] pc_hi[0:4095], pc_lo[0:4095];
-    reg [7:0] pv_hi[0:4095], pv_lo[0:4095];
-    wire [11:0] pwo = cpu_addr[12:1];
-    wire pw_hi = cpu_we & cs_pal & cpu_uds;
-    wire pw_lo = cpu_we & cs_pal & cpu_lds;
-    always @(posedge clk) begin
-        if (pw_hi) begin pc_hi[pwo]<=cpu_wdata[15:8]; pv_hi[pwo]<=cpu_wdata[15:8]; end
-        if (pw_lo) begin pc_lo[pwo]<=cpu_wdata[7:0];  pv_lo[pwo]<=cpu_wdata[7:0];  end
-        cpu_pal_rdata <= {pc_hi[pwo], pc_lo[pwo]};
-        pal_q <= {pv_hi[pal_a], pv_lo[pal_a]};
-    end
-
-`ifdef WRALLY2_SCENE
-
-    initial begin
-        $readmemh("scene_ve_hi.hex", ce_hi);  $readmemh("scene_ve_lo.hex", ce_lo);
-        $readmemh("scene_vo_hi.hex", co_hi);  $readmemh("scene_vo_lo.hex", co_lo);
-        $readmemh("scene_ve_hi.hex", t0e_hi); $readmemh("scene_ve_lo.hex", t0e_lo);
-        $readmemh("scene_vo_hi.hex", t0o_hi); $readmemh("scene_vo_lo.hex", t0o_lo);
-        $readmemh("scene_ve_hi.hex", t1e_hi); $readmemh("scene_ve_lo.hex", t1e_lo);
-        $readmemh("scene_vo_hi.hex", t1o_hi); $readmemh("scene_vo_lo.hex", t1o_lo);
-        $readmemh("scene_ve_hi.hex", we_hi);  $readmemh("scene_ve_lo.hex", we_lo);
-        $readmemh("scene_vo_hi.hex", wo_hi);  $readmemh("scene_vo_lo.hex", wo_lo);
-        $readmemh("scene_ve_hi.hex", se_hi);  $readmemh("scene_ve_lo.hex", se_lo);
-        $readmemh("scene_vo_hi.hex", so_hi);  $readmemh("scene_vo_lo.hex", so_lo);
-        $readmemh("scene_ve_hi.hex", s2e_hi); $readmemh("scene_ve_lo.hex", s2e_lo);
-        $readmemh("scene_vo_hi.hex", s2o_hi); $readmemh("scene_vo_lo.hex", s2o_lo);
-        $readmemh("scene_pal_hi.hex", pc_hi); $readmemh("scene_pal_lo.hex", pc_lo);
-        $readmemh("scene_pal_hi.hex", pv_hi); $readmemh("scene_pal_lo.hex", pv_lo);
-        $display("WRALLY2_SCENE: VRAM(paridad)/paleta precargadas (replay)");
-    end
+`ifdef VERILATOR
+// The harness's scene mode (tb_wrally2 --scene) writes a MAME dump in here:
+// sc_sel 0 the VRAM, 1 the sprite buffer, 2 the palette.
+reg        sc_we   /*verilator public_flat_rw*/ = 1'b0;
+reg [1:0]  sc_sel  /*verilator public_flat_rw*/ = 2'd0;
+reg [14:0] sc_addr /*verilator public_flat_rw*/ = 15'd0;
+reg [15:0] sc_data /*verilator public_flat_rw*/ = 16'd0;
 `endif
+
+// ================================================================ VRAM
+wire [12:0] a_row  = cpu_addr[15:3];
+wire [1:0]  a_bank = cpu_addr[2:1];
+
+reg  [12:0] cp_row;
+reg         cp_run;
+reg  [14:0] wrd_last;
+reg         wrd_seen;
+
+localparam [1:0] K_NONE = 2'd0, K_TILE = 2'd1, K_SCROLL = 2'd2, K_COPY = 2'd3;
+wire        scroll_due = !wrd_seen || wrd_a != wrd_last || !cp_run;
+wire [1:0]  b_kind = tp_rd ? K_TILE : scroll_due ? K_SCROLL : cp_run ? K_COPY : K_NONE;
+wire [12:0] b_row  = tp_rd ? tp_idx[13:1] : (b_kind == K_SCROLL) ? wrd_a[14:2] : cp_row;
+
+reg  [1:0]  b_kind_q;
+reg         tp_half_q;
+reg  [1:0]  wrd_bank_q;
+reg  [12:0] b_row_q;
+reg  [1:0]  a_bank_q;
+
+reg  [15:0] a_q [0:3];
+reg  [15:0] b_q [0:3];
+
+genvar k;
+generate for (k = 0; k < 4; k = k + 1) begin : g_vram
+    (* ramstyle = "no_rw_check" *) reg [7:0] hi [0:8191];
+    (* ramstyle = "no_rw_check" *) reg [7:0] lo [0:8191];
+    wire we = cpu_we & cs_vram & (a_bank == k);
+    always @(posedge clk) begin
+        if (we & cpu_uds) hi[a_row] <= cpu_wdata[15:8];
+        if (we & cpu_lds) lo[a_row] <= cpu_wdata[7:0];
+        a_q[k] <= {hi[a_row], lo[a_row]};
+`ifdef VERILATOR
+        if (sc_we && sc_sel == 2'd0 && sc_addr[1:0] == k) begin
+            hi[sc_addr[14:2]] <= sc_data[15:8]; lo[sc_addr[14:2]] <= sc_data[7:0];
+        end
+`endif
+    end
+    always @(posedge clk) b_q[k] <= {hi[b_row], lo[b_row]};
+end endgenerate
+
+assign cpu_vram_rdata = a_q[a_bank_q];
+assign tp_q = tp_half_q ? {b_q[2], b_q[3]} : {b_q[0], b_q[1]};
+
+always @(posedge clk) begin
+    a_bank_q   <= a_bank;
+    b_kind_q   <= b_kind;
+    b_row_q    <= b_row;
+    tp_half_q  <= tp_idx[0];
+    wrd_bank_q <= wrd_a[1:0];
+    if (b_kind == K_SCROLL) begin wrd_last <= wrd_a; wrd_seen <= 1'b1; end
+    if (b_kind_q == K_SCROLL) wrd_q <= b_q[wrd_bank_q];
+end
+
+// ================================================================ the copy
+reg cp_wr;
+always @(posedge clk) begin
+    cp_wr <= b_kind == K_COPY;
+    if (rst) begin
+        cp_run <= 1'b0; cp_wr <= 1'b0;
+    end else if (snap && !cp_run) begin
+        cp_run <= 1'b1; cp_row <= 13'd0;
+    end else if (b_kind == K_COPY) begin
+        cp_row <= cp_row + 13'd1;
+        if (cp_row == 13'h1fff) cp_run <= 1'b0;
+    end
+end
+assign copying = snap | cp_run | cp_wr;
+
+reg  [15:0] s_q [0:3];
+reg  [1:0]  spr_bank_q;
+generate for (k = 0; k < 4; k = k + 1) begin : g_sbuf
+    (* ramstyle = "no_rw_check" *) reg [15:0] m [0:8191];
+    always @(posedge clk) begin
+        if (cp_wr) m[b_row_q] <= b_q[k];
+`ifdef VERILATOR
+        if (sc_we && sc_sel == 2'd1 && sc_addr[1:0] == k) m[sc_addr[14:2]] <= sc_data;
+`endif
+        s_q[k] <= m[spr_a[14:2]];
+    end
+end endgenerate
+always @(posedge clk) spr_bank_q <= spr_a[1:0];
+assign spr_q = s_q[spr_bank_q];
+
+// ================================================================ palette
+(* ramstyle = "no_rw_check" *) reg [7:0] pal_hi [0:4095];
+(* ramstyle = "no_rw_check" *) reg [7:0] pal_lo [0:4095];
+wire [11:0] pwo = cpu_addr[12:1];
+wire        pwe = cpu_we & cs_pal;
+always @(posedge clk) begin
+    if (pwe & cpu_uds) pal_hi[pwo] <= cpu_wdata[15:8];
+    if (pwe & cpu_lds) pal_lo[pwo] <= cpu_wdata[7:0];
+    cpu_pal_rdata <= {pal_hi[pwo], pal_lo[pwo]};
+`ifdef VERILATOR
+    if (sc_we && sc_sel == 2'd2) begin pal_hi[sc_addr[11:0]] <= sc_data[15:8]; pal_lo[sc_addr[11:0]] <= sc_data[7:0]; end
+`endif
+end
+always @(posedge clk) pal_q <= {pal_hi[pal_a], pal_lo[pal_a]};
+
+// synthesis translate_off
+initial begin cp_run = 1'b0; cp_wr = 1'b0; wrd_seen = 1'b0; b_kind_q = K_NONE; end
+// synthesis translate_on
+
 endmodule
 
 `default_nettype wire

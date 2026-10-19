@@ -26,10 +26,12 @@ module wrally2_cpu_clk (
     input  wire clk,            // 48 MHz
     input  wire run,            // 0 = paused: no credit, no clocks
     input  wire ASn,
-    input  wire rom_wait,       // a ROM read in progress whose data is not ready
+    input  wire rom_wait,       // a read in progress whose data is not ready
+    input  wire hold,           // board time stands still, DTACK as it is
     output reg  cpu_cen,        // fx68k enPhi1
     output reg  cpu_cenb,       // fx68k enPhi2
     output reg  tick,           // with cpu_cen: one 68000 clock of board time
+    output wire mid,            // between a phi1 and its phi2
     output wire DTACKn
 );
 
@@ -39,7 +41,7 @@ reg         ph;                 // 0: phi1 next, 1: phi2 next
 wire        gain = run && (acc >= 6'd35);
 // Enables are registered: one may still land in the clock after AS falls,
 // which is S3, two phases before the 68000 samples DTACK.
-wire        go   = run && !rom_wait;
+wire        go   = run && !rom_wait && !hold;
 
 always @(posedge clk) begin
     if (rst) begin
@@ -58,10 +60,13 @@ always @(posedge clk) begin
     end
 end
 
-// No wait states: DTACK with AS, except for a ROM read still waiting (the
+// No wait states: DTACK with AS, except for a read still waiting (the
 // CPU is held then anyway; this only keeps a stray phase from taking a
-// word that is not there).
+// word that is not there). A hold leaves DTACK alone: one may start just as
+// the 68000 samples it (a write's data strobes come out then), and a DTACK
+// held back there would be a wait state MAME's 68000 never has.
 assign DTACKn = ASn | rom_wait;
+assign mid    = ph;
 
 endmodule
 

@@ -5,7 +5,8 @@
 //       [--rom-lat N] [--trace file] [--trace-count N] [--trace-from F]
 //       [--mcu-trace file]
 //       [--mcu-sram] [--inputs plan.txt] [--dsw hex] [--wheel hex]
-//       [--release N] [--gen-dir dir] [--ticks file]
+//       [--release N] [--gen-dir dir] [--ticks file] [--audio file]
+//       [--scene dumpdir]
 //
 // Hosts wrally2_board the way the Pocket shell does, with behavioural
 // memories:
@@ -14,6 +15,8 @@
 //           (--rom-lat, 48 MHz clocks). Optimistic: no contention, no
 //           refresh. It answers "does the board work", not "does it fit
 //           the bandwidth".
+//   SRAM    work + extra RAM, 128K words, timed as pocket_sram: the ack
+//           five clocks after the request is seen, one dead clock after.
 //
 // The loader snoop is fed the ds5002 slot before reset is released, as the
 // Pocket's loader passes it. The CPUs are then released --release clocks
@@ -30,7 +33,15 @@
 // at frame F's IRQ ("# frame F" first), as the Lua script's BUS_TRACE_FROM.
 //
 // Writes frame_NNNNN.ppm (384 x 240) for each requested frame and one line
-// a frame to stats.csv.
+// a frame to stats.csv: with the sprite engine's longest line in 48 MHz
+// clocks, the lines it did not finish and the most cells on one line.
+// --scene draws a MAME dump (tools/mame_wrally2_dump.lua: vram.bin,
+// vram_buffer.bin, palette.bin, vregs.bin) instead of running the game:
+// board time paused from release, the dump written into the VRAM, the
+// sprite buffer, the palette and the vregs, and `frames` counted in video
+// frames; frame 3 on is the dump's picture, to set against its screen.png.
+// --audio writes the GAE1's samples, 7812.5 a second, as raw signed 16-bit
+// little-endian pairs (its first output, then its second).
 
 #include "Vwrally2_board.h"
 #include "Vwrally2_board___024root.h"
@@ -89,7 +100,7 @@ int main(int argc, char** argv) {
     std::string outdir = absolute(argv[3]);
     std::set<int> dumps;
     int rom_lat = 10;
-    std::string trace_path, mcu_path, ticks_path, inputs_path, gen_dir = absolute("build/gen");
+    std::string trace_path, mcu_path, ticks_path, inputs_path, audio_path, scene_dir, gen_dir = absolute("build/gen");
     long trace_count = 0;
     int trace_from = 0;
     bool mcu_sram = false;
@@ -108,6 +119,8 @@ int main(int argc, char** argv) {
         else if (!strcmp(argv[i], "--wheel") && i + 1 < argc)       wheel = strtoul(argv[++i], 0, 16);
         else if (!strcmp(argv[i], "--release") && i + 1 < argc)     release = atoll(argv[++i]);
         else if (!strcmp(argv[i], "--gen-dir") && i + 1 < argc)     gen_dir = absolute(argv[++i]);
+        else if (!strcmp(argv[i], "--audio") && i + 1 < argc)       audio_path = absolute(argv[++i]);
+        else if (!strcmp(argv[i], "--scene") && i + 1 < argc)       scene_dir = absolute(argv[++i]);
         else {
             std::string s = argv[i];
             size_t p = 0;
@@ -151,12 +164,10 @@ int main(int argc, char** argv) {
     t->dl_wr = 0;
 
     uint64_t cyc = 0;
-    // One 48 MHz clock: both clocks rise together, clk96 rises again halfway.
+    // One 48 MHz clock
     auto tick = [&]() {
-        t->clk = 1; t->clk96 = 1; t->eval();
-        t->clk96 = 0; t->eval();
-        t->clk = 0; t->clk96 = 1; t->eval();
-        t->clk96 = 0; t->eval();
+        t->clk = 1; t->eval();
+        t->clk = 0; t->eval();
         cyc++;
     };
 
@@ -183,6 +194,25 @@ int main(int argc, char** argv) {
         t->rom_ack = ack;
     };
 
+    // ----------------------------------------------------------- SRAM
+    std::vector<uint16_t> sram(1u << 17, 0);
+    int sram_cnt = 0, sram_dead = 0;
+    auto serve_sram = [&]() {
+        t->sram_ack = 0;
+        if (sram_dead) { sram_dead--; return; }
+        if (!sram_cnt && t->sram_req) sram_cnt = 5;
+        if (sram_cnt && --sram_cnt == 0) {
+            uint32_t a = t->sram_addr & 0x1ffff;
+            if (t->sram_we) {
+                uint16_t m = (t->sram_be & 2 ? 0xff00 : 0) | (t->sram_be & 1 ? 0x00ff : 0);
+                sram[a] = (sram[a] & ~m) | (t->sram_din & m);
+            }
+            t->sram_dout = sram[a];
+            t->sram_ack = 1;
+            sram_dead = 1;
+        }
+    };
+
     // Power-on: a few clocks of reset, then the ds5002 slot through the snoop
     // (every other clock, as the board asks), video running throughout.
     for (int i = 0; i < 16; i++) tick();
@@ -200,7 +230,39 @@ int main(int argc, char** argv) {
         while (!seen) { tick(); if (R.wrally2_board__DOT__dbg_vbirq) { seen = true; at = cyc; } }
         while (cyc < at + (uint64_t)release) tick();
     }
+    const bool scene = !scene_dir.empty();
+    if (scene) t->pause = 1;
     t->rom_loaded = 1;
+    if (scene) {
+        auto load = [&](const char* name, int sel, int words) {
+            std::vector<uint8_t> d(words * 2, 0);
+            FILE* f = fopen((scene_dir + "/" + name).c_str(), "rb");
+            if (!f) { perror(name); exit(1); }
+            size_t n = fread(d.data(), 1, d.size(), f);
+            fclose(f);
+            for (int w = 0; w < (int)(n / 2); w++) {
+                uint16_t v = d[2 * w] | (d[2 * w + 1] << 8);
+                if (sel < 3) {
+                    R.wrally2_board__DOT__u_vmem__DOT__sc_we = 1;
+                    R.wrally2_board__DOT__u_vmem__DOT__sc_sel = sel;
+                    R.wrally2_board__DOT__u_vmem__DOT__sc_addr = w;
+                    R.wrally2_board__DOT__u_vmem__DOT__sc_data = v;
+                } else {
+                    R.wrally2_board__DOT__u_main__DOT__sc_vwe = 1;
+                    R.wrally2_board__DOT__u_main__DOT__sc_vsel = 2 + w;
+                    R.wrally2_board__DOT__u_main__DOT__sc_vdata = v;
+                }
+                tick();
+            }
+            R.wrally2_board__DOT__u_vmem__DOT__sc_we = 0;
+            R.wrally2_board__DOT__u_main__DOT__sc_vwe = 0;
+        };
+        load("vram.bin", 0, 0x8000);
+        load("vram_buffer.bin", 1, 0x8000);
+        load("palette.bin", 2, 0x1000);
+        load("vregs.bin", 3, 3);
+        fprintf(stderr, "scene %s loaded\n", scene_dir.c_str());
+    }
     const uint64_t cyc0 = cyc;
     fprintf(stderr, "CPUs released at clock %llu\n", (unsigned long long)cyc0);
 
@@ -284,14 +346,35 @@ int main(int argc, char** argv) {
     int x = 0, y = 0, frame = 0;
     int prev_hb = 1, prev_vb = 1;
     FILE* stats = fopen((outdir + "/stats.csv").c_str(), "w");
-    fprintf(stats, "frame,cycles,bus_cycles,mcu_accesses\n");
+    fprintf(stats, "frame,cycles,bus_cycles,mcu_accesses,spr_max_clocks,spr_cut_lines,spr_max_cells\n");
+    int spr_max = 0, spr_cut = 0, spr_cells = 0, spr_max_all = 0, spr_cut_all = 0, spr_cells_all = 0;
+    FILE* audio = audio_path.empty() ? nullptr : fopen(audio_path.c_str(), "wb");
+    long audio_n = 0;
     uint64_t bus_cycles = 0, bus_cycles_f = 0;
     long mcu_f = 0;
     bool irq_prev = false;
 
+    auto fold_sprites = [&]() {
+        if (spr_max > spr_max_all) spr_max_all = spr_max;
+        if (spr_cells > spr_cells_all) spr_cells_all = spr_cells;
+        spr_cut_all += spr_cut;
+        spr_max = spr_cut = spr_cells = 0;
+    };
     while (frame < frames) {
         serve_rom();
+        serve_sram();
         tick();
+        if (R.wrally2_board__DOT__u_video__DOT__u_spr_l__DOT__m_done) {
+            int c = R.wrally2_board__DOT__u_video__DOT__u_spr_l__DOT__m_last;
+            int n = R.wrally2_board__DOT__u_video__DOT__u_spr_l__DOT__m_ncell;
+            if (c == 0xffff) spr_cut++; else if (c > spr_max) spr_max = c;
+            if (n > spr_cells) spr_cells = n;
+        }
+        if (audio && t->snd_sample) {
+            int16_t pair[2] = { (int16_t)t->snd_l, (int16_t)t->snd_r };
+            fwrite(pair, 2, 2, audio);
+            audio_n++;
+        }
         bclk += R.wrally2_board__DOT__dbg_cen;
         if (ticks && R.wrally2_board__DOT__dbg_irq) fprintf(ticks, "# irq %llu\n", (unsigned long long)bclk);
 
@@ -338,8 +421,10 @@ int main(int argc, char** argv) {
             if (irq && !irq_prev) {
                 if (frame + 1 >= trace_from) tracing = true;
                 if (trace && tracing) fprintf(trace, "# frame %d\n", frame + 1);
-                fprintf(stats, "%d,%llu,%llu,%ld\n", frame, (unsigned long long)(cyc - cyc0),
-                        (unsigned long long)(bus_cycles - bus_cycles_f), mtraced - mcu_f);
+                fprintf(stats, "%d,%llu,%llu,%ld,%d,%d,%d\n", frame, (unsigned long long)(cyc - cyc0),
+                        (unsigned long long)(bus_cycles - bus_cycles_f), mtraced - mcu_f,
+                        spr_max, spr_cut, spr_cells);
+                fold_sprites();
                 bus_cycles_f = bus_cycles; mcu_f = mtraced;
                 fflush(stats);
                 if (frame % 10 == 0)
@@ -356,9 +441,9 @@ int main(int argc, char** argv) {
             if (!hb && !vb) {
                 if (x < 384 && y < 240) {
                     uint8_t* px = &img[(y * 384 + x) * 3];
-                    px[0] = (t->r << 3) | (t->r >> 2);
-                    px[1] = (t->g << 3) | (t->g >> 2);
-                    px[2] = (t->b << 3) | (t->b >> 2);
+                    px[0] = t->r;
+                    px[1] = t->g;
+                    px[2] = t->b;
                 }
                 x++;
             }
@@ -372,6 +457,7 @@ int main(int argc, char** argv) {
                     fwrite(img.data(), 1, img.size(), f);
                     fclose(f);
                 }
+                if (scene) { if (frame >= 2) fold_sprites(); else spr_max = spr_cut = spr_cells = 0; frame++; }
                 y = 0; x = 0;
             }
             prev_hb = hb; prev_vb = vb;
@@ -381,7 +467,11 @@ int main(int argc, char** argv) {
     if (trace) fclose(trace);
     if (mtrace) fclose(mtrace);
     if (ticks) fclose(ticks);
+    if (audio) fclose(audio);
     fclose(stats);
+    fprintf(stderr, "sprites: longest line %d clocks, %d lines cut, most cells on a line %d\n",
+            spr_max_all, spr_cut_all, spr_cells_all);
+    if (audio) fprintf(stderr, "audio: %ld samples\n", audio_n);
     fprintf(stderr, "%d frames, %ld 68000 accesses and %ld DS5002 accesses traced, %llu clocks\n",
             frames, traced, mtraced, (unsigned long long)(cyc - cyc0));
     t->final();
