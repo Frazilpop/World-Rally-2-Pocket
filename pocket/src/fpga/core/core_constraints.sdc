@@ -136,3 +136,21 @@ foreach {from to} [list $mcu $mcu  $mcu $mcu_iram  $mcu_iram $mcu  $mcu_prom $mc
     set_multicycle_path -from [get_keepers $from] -to [get_keepers $to] -setup -end 2
     set_multicycle_path -from [get_keepers $from] -to [get_keepers $to] -hold  -end 1
 }
+
+# ------------------------------------------------- the board's SDRAM ports
+#
+# A port's line address (wrally2_romport rom_addr, 48 MHz) reaches
+# kaneko_sdram's addr_p (96 MHz) through kaneko_sdram_x2 untouched. The
+# romport changes it only on the clock it raises rom_req, from low, and
+# addr_p loads only on the request's rising edge as the controller sees it:
+# on the 96 MHz edge where the address changes the controller still sees the
+# old request, low, and the load comes an edge later from a settled address.
+# So the hold check belongs one 96 MHz edge earlier (-end 1); setup stays
+# single-cycle. Left at the default, the same-edge check failed by 9 ps on
+# u_rp_main (fast corner, 0.54 ns of skew between the two clocks).
+set rp_addr {*|u_board|u_rp_*|rom_addr[*]}
+set sd_addr {*|u_sdram|addr_p[*]}
+if {[get_collection_size [get_keepers -nowarn $rp_addr]] == 0 || [get_collection_size [get_keepers -nowarn $sd_addr]] == 0} {
+    post_message -type error "core_constraints.sdc: no keepers match '$rp_addr' or '$sd_addr'; the SDRAM ports' hold multicycle would be a no-op. Fix the instance names."
+}
+set_multicycle_path -from [get_keepers $rp_addr] -to [get_keepers $sd_addr] -hold -end 1

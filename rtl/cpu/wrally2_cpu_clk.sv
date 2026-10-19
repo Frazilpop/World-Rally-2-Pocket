@@ -13,6 +13,13 @@
 // however long the SDRAM takes; board time trails wall time by the credit
 // owed, a few microseconds at most.
 //
+// The credit holds 4,095 ticks. When the SDRAM's waits outrun the catch-up
+// for longer than that (the power-on ROM test, at a line latency of 14
+// clocks or more), board time drops the clocks it cannot give and marks
+// each with `lost`: the CPUs run that much slower, as an overloaded board
+// would, and the vblank IRQ counts the lost clocks as given, so it stays on
+// the picture's vblank.
+//
 // Replaces jlrh's wrally2_68kdtack (jtframe's 68000 cen/DTACK with
 // recovery), whose catch-up gives back cycles but not the 68000's timing:
 // measured against MAME, its CPU fell 3.4% behind and took IRQs on other
@@ -33,7 +40,8 @@ module wrally2_cpu_clk (
     output reg  tick,           // with cpu_cen: one 68000 clock of board time
     output wire mid,            // between a phi1 and its phi2
     output wire DTACKn,
-    output wire [11:0] owed     // board time behind wall time, in ticks
+    output wire [11:0] owed,    // board time behind wall time, in ticks
+    output reg  lost            // a clock dropped with the credit full
 );
 
 reg  [5:0]  acc;
@@ -47,15 +55,16 @@ wire        go   = run && !rom_wait && !hold;
 always @(posedge clk) begin
     if (rst) begin
         acc <= 6'd0; credit <= 12'd0; ph <= 1'b0;
-        cpu_cen <= 1'b0; cpu_cenb <= 1'b0; tick <= 1'b0;
+        cpu_cen <= 1'b0; cpu_cenb <= 1'b0; tick <= 1'b0; lost <= 1'b0;
     end else begin
         if (run) acc <= gain ? acc + 6'd13 - 6'd48 : acc + 6'd13;
-        cpu_cen <= 1'b0; cpu_cenb <= 1'b0; tick <= 1'b0;
+        cpu_cen <= 1'b0; cpu_cenb <= 1'b0; tick <= 1'b0; lost <= 1'b0;
         if (go && !ph && (credit != 12'd0 || gain)) begin
             cpu_cen <= 1'b1; tick <= 1'b1; ph <= 1'b1;
             credit  <= credit + {11'd0, gain} - 12'd1;
         end else begin
             if (credit != 12'hfff) credit <= credit + {11'd0, gain};
+            else lost <= gain;
             if (go && ph) begin cpu_cenb <= 1'b1; ph <= 1'b0; end
         end
     end

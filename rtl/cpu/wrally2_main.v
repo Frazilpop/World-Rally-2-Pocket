@@ -34,6 +34,7 @@ module wrally2_main (
     input  wire        cpu_hold,       // board time stands still (the GAE1 computing a sample)
     input  wire        mcu_cen,
     output wire [11:0] cpu_owed,       // board time behind wall time, in ticks
+    output wire        cpu_lost,       // a tick dropped with the credit full (wrally2_cpu_clk)
 
     // Work RAM (fe0000-fe7fff, SRAM words 0-3fff) and extra RAM (212000-
     // 213fff, words 4000-4fff) on the platform's SRAM: req held until a
@@ -117,7 +118,7 @@ module wrally2_main (
         .rst(rst), .clk(clk), .run(game_run),
         .ASn(ASn), .rom_wait(bus_busy | (sram_wait & rw_rd)), .hold((sram_wait & ~rw_rd) | cpu_hold),
         .cpu_cen(cpu_cen), .cpu_cenb(cpu_cenb), .tick(cpu_tick), .mid(cpu_mid),
-        .DTACKn(dtack_raw), .owed(cpu_owed)
+        .DTACKn(dtack_raw), .owed(cpu_owed), .lost(cpu_lost)
     );
 
     assign DTACKn = (fc == 3'd7) ? 1'b1 : dtack_raw;

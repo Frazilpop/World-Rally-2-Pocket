@@ -6,7 +6,7 @@
 //       [--mcu-trace file]
 //       [--mcu-sram] [--inputs plan.txt] [--dsw hex] [--wheel hex]
 //       [--release N] [--gen-dir dir] [--ticks file] [--audio file]
-//       [--scene dumpdir]
+//       [--scene dumpdir] [--wlog file]
 //
 // Hosts wrally2_board the way the Pocket shell does, with behavioural
 // memories:
@@ -34,7 +34,12 @@
 //
 // Writes frame_NNNNN.ppm (384 x 240) for each requested frame and one line
 // a frame to stats.csv: with the sprite engine's longest line in 48 MHz
-// clocks, the lines it did not finish and the most cells on one line.
+// clocks, the lines it did not finish, the most cells on one line, the
+// video line IRQ 6 fell on (240 = vblank's first) and the most board time
+// owed in the frame (ticks; 4095 = the credit full, ticks dropped).
+// --wlog writes every 68000 write to the VRAM, the palette and the vregs
+// (200000-21800f) with the video line and pixel it landed on:
+// "<frame> <line> <pixel> <addr> <data> <mask>".
 // --scene draws a MAME dump (tools/mame_wrally2_dump.lua: vram.bin,
 // vram_buffer.bin, palette.bin, vregs.bin) instead of running the game:
 // board time paused from release, the dump written into the VRAM, the
@@ -92,7 +97,7 @@ int main(int argc, char** argv) {
     if (argc < 4) {
         fprintf(stderr, "usage: %s set.rom frames outdir [dumps] [--rom-lat N] [--trace f] "
                         "[--trace-count N] [--mcu-trace f] [--mcu-sram] [--inputs plan] "
-                        "[--dsw hex] [--wheel hex] [--release N] [--gen-dir d]\n", argv[0]);
+                        "[--dsw hex] [--wheel hex] [--release N] [--gen-dir d] [--wlog f]\n", argv[0]);
         return 2;
     }
     std::string rom_path = absolute(argv[1]);
@@ -100,7 +105,7 @@ int main(int argc, char** argv) {
     std::string outdir = absolute(argv[3]);
     std::set<int> dumps;
     int rom_lat = 10;
-    std::string trace_path, mcu_path, ticks_path, inputs_path, audio_path, scene_dir, gen_dir = absolute("build/gen");
+    std::string trace_path, mcu_path, ticks_path, inputs_path, audio_path, wlog_path, scene_dir, gen_dir = absolute("build/gen");
     long trace_count = 0;
     int trace_from = 0;
     bool mcu_sram = false;
@@ -120,6 +125,7 @@ int main(int argc, char** argv) {
         else if (!strcmp(argv[i], "--release") && i + 1 < argc)     release = atoll(argv[++i]);
         else if (!strcmp(argv[i], "--gen-dir") && i + 1 < argc)     gen_dir = absolute(argv[++i]);
         else if (!strcmp(argv[i], "--audio") && i + 1 < argc)       audio_path = absolute(argv[++i]);
+        else if (!strcmp(argv[i], "--wlog") && i + 1 < argc)        wlog_path = absolute(argv[++i]);
         else if (!strcmp(argv[i], "--scene") && i + 1 < argc)       scene_dir = absolute(argv[++i]);
         else {
             std::string s = argv[i];
@@ -346,9 +352,11 @@ int main(int argc, char** argv) {
     int x = 0, y = 0, frame = 0;
     int prev_hb = 1, prev_vb = 1;
     FILE* stats = fopen((outdir + "/stats.csv").c_str(), "w");
-    fprintf(stats, "frame,cycles,bus_cycles,mcu_accesses,spr_max_clocks,spr_cut_lines,spr_max_cells\n");
+    fprintf(stats, "frame,cycles,bus_cycles,mcu_accesses,spr_max_clocks,spr_cut_lines,spr_max_cells,irq_line,owed_max\n");
+    int owed_max = 0;
     int spr_max = 0, spr_cut = 0, spr_cells = 0, spr_max_all = 0, spr_cut_all = 0, spr_cells_all = 0;
     FILE* audio = audio_path.empty() ? nullptr : fopen(audio_path.c_str(), "wb");
+    FILE* wlog = wlog_path.empty() ? nullptr : fopen(wlog_path.c_str(), "w");
     long audio_n = 0;
     uint64_t bus_cycles = 0, bus_cycles_f = 0;
     long mcu_f = 0;
@@ -376,6 +384,7 @@ int main(int argc, char** argv) {
             audio_n++;
         }
         bclk += R.wrally2_board__DOT__dbg_cen;
+        if ((int)t->diag_owed > owed_max) owed_max = t->diag_owed;
         if (ticks && R.wrally2_board__DOT__dbg_irq) fprintf(ticks, "# irq %llu\n", (unsigned long long)bclk);
 
         // ---- 68000 bus monitor
@@ -390,6 +399,11 @@ int main(int argc, char** argv) {
             }
             if (!as && as_prev) {
                 bus_cycles++;
+                if (wlog && !c_rd && c_mask && c_addr >= 0x200000 && c_addr < 0x218010)
+                    fprintf(wlog, "%d %d %d %06x %04x %04x\n", frame,
+                            (int)R.wrally2_board__DOT__u_video__DOT__u_timing__DOT__vcnt,
+                            (int)R.wrally2_board__DOT__u_video__DOT__u_timing__DOT__hcnt,
+                            c_addr, c_data & c_mask, c_mask);
                 if (trace && tracing && c_mask) {
                     fprintf(trace, "%06x %c %04x %04x\n", c_addr, c_rd ? 'R' : 'W', c_data & c_mask, c_mask);
                     traced++;
@@ -421,9 +435,11 @@ int main(int argc, char** argv) {
             if (irq && !irq_prev) {
                 if (frame + 1 >= trace_from) tracing = true;
                 if (trace && tracing) fprintf(trace, "# frame %d\n", frame + 1);
-                fprintf(stats, "%d,%llu,%llu,%ld,%d,%d,%d\n", frame, (unsigned long long)(cyc - cyc0),
+                fprintf(stats, "%d,%llu,%llu,%ld,%d,%d,%d,%d,%d\n", frame, (unsigned long long)(cyc - cyc0),
                         (unsigned long long)(bus_cycles - bus_cycles_f), mtraced - mcu_f,
-                        spr_max, spr_cut, spr_cells);
+                        spr_max, spr_cut, spr_cells,
+                        (int)R.wrally2_board__DOT__u_video__DOT__u_timing__DOT__vcnt, owed_max);
+                owed_max = 0;
                 fold_sprites();
                 bus_cycles_f = bus_cycles; mcu_f = mtraced;
                 fflush(stats);
@@ -468,6 +484,7 @@ int main(int argc, char** argv) {
     if (mtrace) fclose(mtrace);
     if (ticks) fclose(ticks);
     if (audio) fclose(audio);
+    if (wlog) fclose(wlog);
     fclose(stats);
     fprintf(stderr, "sprites: longest line %d clocks, %d lines cut, most cells on a line %d\n",
             spr_max_all, spr_cut_all, spr_cells_all);

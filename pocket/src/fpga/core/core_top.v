@@ -825,8 +825,9 @@ pocket_sram u_sram (
 // because IRQ 6 is the instant the sprite buffer is copied (holding board
 // time for ~10,000 clocks) and the copy has to land in vblank. The board's
 // IRQ_DEN is exactly one video frame of ticks, so the two never drift apart
-// once they are in step; what puts them in step is WHEN board time starts
-// and stops:
+// once they are in step (ticks board time has to drop, when the SDRAM's
+// waits run its credit out, IRQ 6 counts as given: wrally2_board); what
+// puts them in step is WHEN board time starts and stops:
 //
 //   - The CPUs are released (board_go) on the first vblank after the ROM is
 //     in and the reset is over, so the first IRQ 6, one frame of ticks

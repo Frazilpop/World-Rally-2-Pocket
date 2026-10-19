@@ -137,7 +137,7 @@ assign ce_pix = ce_pix_r;
 // IRQ 6 is counted in ticks: the CPUs and the interrupt keep MAME's
 // lockstep whatever the SDRAM does. (jlrh: 12 MHz, or 13/48 behind
 // WR2_CEN_FRAC, from the 48 MHz clock; the IRQ from the video timing.)
-wire cpu_tick;
+wire cpu_tick, cpu_lost;
 // The GAE1 counts its samples in ticks too, and holds board time while it
 // computes one (wrally2_gae1_sound, TICKDIV): the 68000 reads the channels'
 // positions, so they must move when MAME's do.
@@ -171,18 +171,39 @@ wire cpu_hold = snd_busy | mcu_owed != 8'd0 | mcu_extra | vram_copying;
 // takes it to IPL in two clocks, so IPL always changes after this tick's phi2
 // and before the next phi1, whether the CPU is running at 13 MHz or catching
 // up at 24. A clock later and that would depend on the SDRAM.
+//
+// Ticks board time had to drop (cpu_lost: the SDRAM's waits ran the credit
+// out) are counted too, one with each tick given until none is left, so
+// IRQ 6 stays on the picture's vblank. Uncounted, every one moved IRQ 6
+// later for good: at a line latency of 20 clocks the power-on ROM test left
+// it at line 75, where the copy and the game's scroll and tile writes tore
+// the picture. Nothing is dropped while the SDRAM keeps up.
 reg  [31:0] irq_acc, irq_first;
 reg         irq_run;
-wire        irq_wrap  = irq_acc + IRQ_NUM >= IRQ_DEN;
-wire        board_irq = cpu_tick && (irq_run ? irq_wrap : irq_first == 32'd1);
+reg  [15:0] irq_lost;
+wire        irq_two   = irq_lost != 16'd0;     // this tick counts a lost one too
+wire [31:0] irq_step  = irq_two ? 2 * IRQ_NUM : IRQ_NUM;
+wire [31:0] irq_fstep = irq_two ? 32'd2 : 32'd1;
+wire        irq_wrap  = irq_acc + irq_step >= IRQ_DEN;
+wire        irq_fwrap = irq_first <= irq_fstep;
+wire        board_irq = cpu_tick && (irq_run ? irq_wrap : irq_fwrap);
 always @(posedge clk) begin
     if (cpu_rst) begin
-        irq_first <= IRQ_FIRST; irq_run <= 1'b0; irq_acc <= 32'd0;
-    end else if (cpu_tick) begin
-        if (!irq_run) begin
-            irq_first <= irq_first - 32'd1;
-            if (irq_first == 32'd1) irq_run <= 1'b1;
-        end else irq_acc <= irq_wrap ? irq_acc + IRQ_NUM - IRQ_DEN : irq_acc + IRQ_NUM;
+        irq_first <= IRQ_FIRST; irq_run <= 1'b0; irq_acc <= 32'd0; irq_lost <= 16'd0;
+    end else begin
+        if (cpu_tick) begin
+            if (!irq_run) begin
+                irq_first <= irq_first - irq_fstep;
+                if (irq_fwrap) begin
+                    irq_run <= 1'b1;
+                    // a lost tick taken past the first IRQ starts the count
+                    irq_acc <= irq_fstep - irq_first;
+                end
+            end else irq_acc <= irq_wrap ? irq_acc + irq_step - IRQ_DEN : irq_acc + irq_step;
+        end
+        if (cpu_lost && !(cpu_tick && irq_two)) begin
+            if (irq_lost != 16'hffff) irq_lost <= irq_lost + 16'd1;
+        end else if (!cpu_lost && cpu_tick && irq_two) irq_lost <= irq_lost - 16'd1;
     end
 end
 
@@ -276,7 +297,7 @@ wrally2_main u_main (
     .vmem_vram_rdata(cpu_vram_rd), .vmem_pal_rdata(cpu_pal_rd),
     .vreg0(vreg0), .vreg1(vreg1), .vreg2(vreg2),
     .sndreg_cs(sndreg_cs), .sndreg_we(sndreg_we), .snd_rdata(snd_rdata),
-    .cpu_tick(cpu_tick), .cpu_hold(cpu_hold), .mcu_cen(mcu_cen), .cpu_owed(diag_owed),
+    .cpu_tick(cpu_tick), .cpu_hold(cpu_hold), .mcu_cen(mcu_cen), .cpu_owed(diag_owed), .cpu_lost(cpu_lost),
     .sram_req(sram_req), .sram_we(sram_we), .sram_addr(sram_addr), .sram_din(sram_din),
     .sram_be(sram_be), .sram_ack(sram_ack), .sram_dout(sram_dout),
     .scr_dl_addr(scr_dl_addr), .scr_dl_data(scr_dl_data), .scr_dl_we(scr_dl_we),
