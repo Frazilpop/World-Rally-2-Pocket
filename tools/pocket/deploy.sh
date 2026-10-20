@@ -5,7 +5,8 @@
 #   tools/pocket/deploy.sh --status                   is the current build on the card?
 #
 # Copies pocket/dist ("Cores/frazilpop.World Rally 2" with the bitstream, the
-# platform JSON and image, the instance JSONs under Assets/wrally2/) onto the
+# platform JSON and image, the instance JSONs under Assets/wrally2/: the parent
+# set's beside the core's folder, the others in its _alternatives/) onto the
 # Pocket's SD card, and each target set's build/pocket/<set>.rom (made by
 # tools/pocket/build_rom.py) to Assets/wrally2/common/. A ROM image already on
 # the card byte for byte is left alone. The card is the volume with
@@ -58,7 +59,8 @@ fi
 # the ROM images to copy: every target set that has both an image and an instance JSON
 roms=()
 for s in $SETS; do
-	[ -f "$ROMS/$s.rom" ] && [ -f "$DIST/Assets/$PLATFORM/$CORE/$s.json" ] && roms+=("$s")
+	[ -f "$ROMS/$s.rom" ] || continue
+	[ -f "$DIST/Assets/$PLATFORM/$CORE/$s.json" ] || [ -f "$DIST/Assets/$PLATFORM/$CORE/_alternatives/$s.json" ] && roms+=("$s")
 done
 [ ${#roms[@]} -gt 0 ] || echo "Warning: no ROM images in $ROMS - the core goes on without games (tools/pocket/build_rom.py all ~/Downloads build/pocket)"
 
@@ -112,6 +114,14 @@ echo $$ >"$LOCK/pid"
 # the core, the platform and the instance JSONs
 for d in Cores Platforms Assets; do
 	[ -d "$DIST/$d" ] && cp -R "$DIST/$d" "$VOL/"
+done
+# an instance JSON the card has in one place and the build in the other is
+# left over from an older layout: drop it, or the set shows twice
+for s in $SETS; do
+	for f in "$s.json" "_alternatives/$s.json"; do
+		[ -f "$VOL/Assets/$PLATFORM/$CORE/$f" ] && [ ! -f "$DIST/Assets/$PLATFORM/$CORE/$f" ] &&
+			rm -f "$VOL/Assets/$PLATFORM/$CORE/$f" "$VOL/Assets/$PLATFORM/$CORE/$(dirname "$f")/._$s.json"
+	done
 done
 echo "Copied the core ($CORE), the platform and ${#roms[@]} instance JSON(s)"
 
