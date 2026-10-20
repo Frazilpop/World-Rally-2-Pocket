@@ -330,12 +330,38 @@ wrally2_vmem u_vmem (
     .pal_a(pal_a), .pal_q(pal_q)
 );
 
+// The sprite engine's vregs change only at IRQ 6, with the buffer. The game
+// double-buffers its sprite list: it writes the half not on show, then
+// points vreg1 bit 4 at it partway down the picture (line ~25 in the
+// attract, ~100 in a race). Read live here, the engine changed halves at
+// that line, and the sprites below it came from the buffer's other half, a
+// list two frames older than those above: the line across the middle of a
+// race, with the road scrolling 8 pixels a frame. MAME draws each frame
+// whole at vblank, before that vblank's copy, with the vregs as they
+// stand; so the picture after IRQ 6 takes the buffer copied at it and the
+// half vreg1 chose by the IRQ before (the game flips every frame), as
+// below. Every frame equals the live engine's picture under its line, which
+// is what matched MAME.
+reg [15:0] spr_vreg0 = 16'd0, spr_vreg1 = 16'd0;    // for this frame
+reg [15:0] spr_vnext0 = 16'd0, spr_vnext1 = 16'd0;  // for the next
+`ifdef VERILATOR
+reg        sc_vfollow /*verilator public_flat_rw*/ = 1'b0;  // scene mode: take them as loaded
+`else
+wire       sc_vfollow = 1'b0;
+`endif
+always @(posedge clk) if (board_irq || sc_vfollow) begin
+    spr_vnext0 <= vreg0;
+    spr_vnext1 <= vreg1;
+    spr_vreg0  <= sc_vfollow ? vreg0 : spr_vnext0;
+    spr_vreg1  <= sc_vfollow ? vreg1 : spr_vnext1;
+end
+
 // The video's own vblank IRQ is left unused: IRQ 6 is board time's (above),
 // and its tick is also the instant the sprite buffer is taken.
 wire vblank_irq;
 wrally2_video_top u_video (
     .clk(clk), .rst(rst), .ce_pix(ce_pix),
-    .vreg0(vreg0), .vreg1(vreg1),
+    .vreg0(vreg0), .spr_vreg0(spr_vreg0), .spr_vreg1(spr_vreg1),
     .tp0_idx(tp0_idx), .tp0_rd(tp0_rd), .tp0_q(tp0_q),
     .wrd_a(wrd_a), .wrd_q(wrd_q), .spr_a(spr_a), .spr_q(spr_q),
     .pal_a(pal_a), .pal_q(pal_q),
@@ -369,6 +395,7 @@ wire [7:0]  dbg_x_din  /*verilator public_flat_rd*/ = u_main.u_mcu.xdata_din_q;
 wire        dbg_x_cen  /*verilator public_flat_rd*/ = u_main.u_mcu.cen_eff;
 wire [15:0] dbg_x_pc   /*verilator public_flat_rd*/ = u_main.u_mcu.core_rom_adr;
 wire        dbg_cen    /*verilator public_flat_rd*/ = cpu_tick;
+wire        dbg_lost   /*verilator public_flat_rd*/ = cpu_lost;
 `endif
 
 endmodule

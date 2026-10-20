@@ -12,7 +12,8 @@
 # game state MAME reaches, whether or not the harness's own run has parted
 # from it. Also prints the sprite engine's longest line in 48 MHz clocks
 # (of 3,072), lines cut short and the most cells on a line, at the SDRAM
-# latency given (default 10 clocks).
+# latency given (default 10 clocks). TB names another harness build, OUT
+# the folder for its pictures (build/sim/scenes).
 set -eu
 [ $# -ge 2 ] || { sed -n '4,15p' "$0"; exit 2; }
 rom=$1; shift
@@ -25,7 +26,7 @@ while [ $# -gt 0 ]; do
   esac
 done
 tb=${TB:-build/obj_wrally2/tb_wrally2}
-out=build/sim/scenes; mkdir -p "$out"
+out=${OUT:-build/sim/scenes}; mkdir -p "$out"
 for d in $dirs; do
   n=$(basename "$d")
   mkdir -p "$out/$n"

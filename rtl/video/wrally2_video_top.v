@@ -13,7 +13,8 @@ module wrally2_video_top #(
     input  wire        rst,
     input  wire        ce_pix,
 
-    input  wire [15:0] vreg0, vreg1,
+    input  wire [15:0] vreg0,                // the tilemap's, live
+    input  wire [15:0] spr_vreg0, spr_vreg1, // the sprites', taken with the buffer
 
     output wire [13:0] tp0_idx, output wire tp0_rd, input wire [31:0] tp0_q,
     output wire [14:0] wrd_a,   input wire [15:0] wrd_q,
@@ -75,7 +76,7 @@ module wrally2_video_top #(
     wrally2_gae1_sprite #(.LBDEPTH(512)) u_spr_l (
         .clk(clk), .ce(1'b1), .start(spr_start), .line(render_line),
         .index(1'b0), .twin(1'b0),
-        .vreg0(vreg0), .vreg1(vreg1), .busy(),
+        .vreg0(spr_vreg0), .vreg1(spr_vreg1), .busy(),
         .spr_a(spr_a), .spr_q(spr_q),
         .rom_a(rom_as), .d_line(gfxs_line), .gfx_ok(gfxs_ok),
         .lb_x(hpos_lb), .lb_q(lb_q),

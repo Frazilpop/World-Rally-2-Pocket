@@ -7,6 +7,9 @@
 # does (MCU_TRIM, MCU_LAG: wrally2_board). MCU=mc8051 builds the DS5002
 # as jlrh had it; the default is jt8051, whose microcode headers are made
 # here with jtframe's ucode tool (Go) into build/gen/jt8051.
+# SDR=real times the ROM lines with the shell's SDRAM controller
+# (sim/wrally2/sdr_timing.sv, built first as its own model) instead of the
+# harness's fixed latency.
 set -euo pipefail
 JR=third_party/jtcores/modules/jtframe/hdl/ram
 J8=third_party/jtcores/modules/jt8051
@@ -26,13 +29,22 @@ export TMPDIR="$PWD/build/tmp"
 [ -f build/gen/volume_table.mem ] || python3 -I tools/gen_volume_table.py build/gen/volume_table.mem
 cmp -s third_party/fx68k/hdl/microrom.mem build/gen/microrom.mem || cp third_party/fx68k/hdl/microrom.mem build/gen/
 cmp -s third_party/fx68k/hdl/nanorom.mem build/gen/nanorom.mem || cp third_party/fx68k/hdl/nanorom.mem build/gen/
+SDRG=()
+if [ "${SDR:-}" = real ]; then
+  SO="${OBJ:-build/obj_wrally2}_sdr"
+  verilator --cc -O3 --x-assign fast --x-initial 0 -Wno-fatal -Wno-lint -Wno-style \
+    --top-module sdr_timing --prefix Vsdr_timing --Mdir "$SO" \
+    sim/wrally2/sdr_timing.sv rtl/mem/kaneko_sdram_x2.sv rtl/mem/kaneko_sdram.sv sim/mem/sdram_model.sv
+  make -s -C "$SO" -f Vsdr_timing.mk Vsdr_timing__ALL.a OPT_FAST=-O2
+  SDRG=(-CFLAGS -DSDR_REAL -CFLAGS "-I$PWD/$SO" "$PWD/$SO/Vsdr_timing__ALL.a")
+fi
 if [ "${PIX:-mame}" = jlrh ]; then PIXG=(-GPIX_NUM=1 -GPIX_DEN=6)
 else PIXG=(-GPIX_NUM=13002 -GPIX_DEN=78125 -GIRQ_NUM=${IRQ_NUM:-591} -GIRQ_DEN=${IRQ_DEN:-130000000} -GIRQ_FIRST=${IRQ_FIRST:-219966}
        -GMCU_TRIM=${MCU_TRIM:-1625000} -GMCU_LAG=${MCU_LAG:-18}); fi
 verilator --cc --exe --build -j 0 -O3 --x-assign fast --x-initial 0 \
   -Wno-fatal -Wno-lint -Wno-style -Wno-MULTIDRIVEN -Wno-TIMESCALEMOD \
   --top-module wrally2_board --Mdir "${OBJ:-build/obj_wrally2}" -o tb_wrally2 \
-  "${PIXG[@]}" -CFLAGS -O2 "$@" \
+  "${PIXG[@]}" ${SDRG[@]+"${SDRG[@]}"} -CFLAGS -O2 "$@" \
   rtl/top/wrally2_board.sv rtl/mem/wrally2_romport.sv \
   rtl/cpu/wrally2_main.v rtl/cpu/wrally2_addr_decode.v rtl/cpu/wrally2_cpu_clk.sv \
   rtl/io/wrally2_inputs.v rtl/io/wrally2_adc.v \

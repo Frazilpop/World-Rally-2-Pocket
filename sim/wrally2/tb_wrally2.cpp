@@ -14,7 +14,11 @@
 //   SDRAM   the .rom image; four independent line ports, fixed latency
 //           (--rom-lat, 48 MHz clocks). Optimistic: no contention, no
 //           refresh. It answers "does the board work", not "does it fit
-//           the bandwidth".
+//           the bandwidth". Built with SDR=real (sim/wrally2/build.sh),
+//           the shell's own controller times the lines instead
+//           (sim/wrally2/sdr_timing.sv: kaneko_sdram_x2, kaneko_sdram,
+//           sdram_model, the read-back port asking once a frame) and
+//           --rom-lat is ignored; the data still comes from the image.
 //   SRAM    work + extra RAM, 128K words, timed as pocket_sram: the ack
 //           five clocks after the request is seen, one dead clock after.
 //
@@ -51,6 +55,9 @@
 #include "Vwrally2_board.h"
 #include "Vwrally2_board___024root.h"
 #include "verilated.h"
+#ifdef SDR_REAL
+#include "Vsdr_timing.h"
+#endif
 
 #include <climits>
 #include <cstdio>
@@ -180,6 +187,45 @@ int main(int argc, char** argv) {
     // ----------------------------------------------------------- ROM ports
     struct Port { int busy = 0; int cnt = 0; uint32_t addr = 0; };
     Port rp[NP];
+    // The longest wait on each port, request to acknowledge, in 48 MHz
+    // clocks (as the overlay's counters 1-3 count them), this frame
+    int w_cnt[NP] = {0}, w_max[NP] = {0};
+    auto count_waits = [&](uint32_t req, uint32_t ack) {
+        for (int p = 0; p < NP; p++) {
+            if ((req >> p) & 1) { w_cnt[p]++; if (w_cnt[p] > w_max[p]) w_max[p] = w_cnt[p]; }
+            if ((ack >> p) & 1) w_cnt[p] = 0;
+        }
+    };
+#ifdef SDR_REAL
+    Vsdr_timing* sd = new Vsdr_timing;
+    sd->rst_n = 0; sd->s_req = 0;
+    for (int i = 0; i < 8; i++) { sd->clk_fast = 1; sd->eval(); sd->clk_fast = 0; sd->eval(); }
+    sd->rst_n = 1;
+    bool rb_want = false;           // the read-back port's once-a-frame request
+    auto serve_rom = [&]() {
+        uint32_t req = t->rom_req;
+        uint32_t sreq = req | (rb_want ? 1u << NP : 0);
+        sd->s_req = sreq;
+        for (int p = 0; p < NP; p++)
+            setbits(sd->s_addr, p * SDR_AW, SDR_AW, getbits(t->rom_addr, p * SDR_AW, SDR_AW));
+        setbits(sd->s_addr, NP * SDR_AW, SDR_AW, 0);
+        uint32_t ack = 0;
+        for (int k = 0; k < 2; k++) {
+            sd->clk_fast = 1; sd->eval();
+            sd->clk_fast = 0; sd->eval();
+            ack |= sd->s_ack;
+        }
+        if ((ack >> NP) & 1) rb_want = false;
+        ack &= (1u << NP) - 1;
+        for (int p = 0; p < NP; p++) if ((ack >> p) & 1) {
+            uint32_t w = (uint32_t)getbits(t->rom_addr, p * SDR_AW, SDR_AW) & ~3u;
+            for (int k = 0; k < 4; k++)
+                setbits(t->rom_dout, p * 64 + k * 16, 16, rom_word(w + k));
+        }
+        count_waits(req, ack);
+        t->rom_ack = ack;
+    };
+#else
     auto serve_rom = [&]() {
         uint32_t req = t->rom_req;
         uint32_t ack = 0;
@@ -197,8 +243,10 @@ int main(int argc, char** argv) {
                 P.busy = 0;
             }
         }
+        count_waits(req, ack);
         t->rom_ack = ack;
     };
+#endif
 
     // ----------------------------------------------------------- SRAM
     std::vector<uint16_t> sram(1u << 17, 0);
@@ -267,6 +315,9 @@ int main(int argc, char** argv) {
         load("vram_buffer.bin", 1, 0x8000);
         load("palette.bin", 2, 0x1000);
         load("vregs.bin", 3, 3);
+        R.wrally2_board__DOT__sc_vfollow = 1;   // the sprite engine's copy of them too
+        tick();
+        R.wrally2_board__DOT__sc_vfollow = 0;
         fprintf(stderr, "scene %s loaded\n", scene_dir.c_str());
     }
     const uint64_t cyc0 = cyc;
@@ -352,7 +403,10 @@ int main(int argc, char** argv) {
     int x = 0, y = 0, frame = 0;
     int prev_hb = 1, prev_vb = 1;
     FILE* stats = fopen((outdir + "/stats.csv").c_str(), "w");
-    fprintf(stats, "frame,cycles,bus_cycles,mcu_accesses,spr_max_clocks,spr_cut_lines,spr_max_cells,irq_line,owed_max\n");
+    fprintf(stats, "frame,cycles,bus_cycles,mcu_accesses,spr_max_clocks,spr_cut_lines,spr_max_cells,irq_line,owed_max,"
+                   "tm_ovr,lost,wait0,wait1,wait2,wait3\n");
+    int tm_ovr = 0, tm_ovr_all = 0, wait_all[NP] = {0};
+    long lost = 0, lost_all = 0;
     int owed_max = 0;
     int spr_max = 0, spr_cut = 0, spr_cells = 0, spr_max_all = 0, spr_cut_all = 0, spr_cells_all = 0;
     FILE* audio = audio_path.empty() ? nullptr : fopen(audio_path.c_str(), "wb");
@@ -385,6 +439,8 @@ int main(int argc, char** argv) {
         }
         bclk += R.wrally2_board__DOT__dbg_cen;
         if ((int)t->diag_owed > owed_max) owed_max = t->diag_owed;
+        tm_ovr += t->diag_tm_ovr;
+        lost += R.wrally2_board__DOT__dbg_lost;
         if (ticks && R.wrally2_board__DOT__dbg_irq) fprintf(ticks, "# irq %llu\n", (unsigned long long)bclk);
 
         // ---- 68000 bus monitor
@@ -435,11 +491,14 @@ int main(int argc, char** argv) {
             if (irq && !irq_prev) {
                 if (frame + 1 >= trace_from) tracing = true;
                 if (trace && tracing) fprintf(trace, "# frame %d\n", frame + 1);
-                fprintf(stats, "%d,%llu,%llu,%ld,%d,%d,%d,%d,%d\n", frame, (unsigned long long)(cyc - cyc0),
+                fprintf(stats, "%d,%llu,%llu,%ld,%d,%d,%d,%d,%d,%d,%ld,%d,%d,%d,%d\n", frame, (unsigned long long)(cyc - cyc0),
                         (unsigned long long)(bus_cycles - bus_cycles_f), mtraced - mcu_f,
                         spr_max, spr_cut, spr_cells,
-                        (int)R.wrally2_board__DOT__u_video__DOT__u_timing__DOT__vcnt, owed_max);
+                        (int)R.wrally2_board__DOT__u_video__DOT__u_timing__DOT__vcnt, owed_max,
+                        tm_ovr, lost, w_max[0], w_max[1], w_max[2], w_max[3]);
                 owed_max = 0;
+                tm_ovr_all += tm_ovr; tm_ovr = 0; lost_all += lost; lost = 0;
+                for (int p = 0; p < NP; p++) { if (w_max[p] > wait_all[p]) wait_all[p] = w_max[p]; w_max[p] = 0; }
                 fold_sprites();
                 bus_cycles_f = bus_cycles; mcu_f = mtraced;
                 fflush(stats);
@@ -465,6 +524,9 @@ int main(int argc, char** argv) {
             }
             if (hb && !prev_hb && !vb) { y++; x = 0; }
             if (vb && !prev_vb) {
+#ifdef SDR_REAL
+                rb_want = true;
+#endif
                 if (dumps.count(frame)) {
                     char fn[1024];
                     snprintf(fn, sizeof fn, "%s/frame_%05d.ppm", outdir.c_str(), frame);
@@ -488,6 +550,12 @@ int main(int argc, char** argv) {
     fclose(stats);
     fprintf(stderr, "sprites: longest line %d clocks, %d lines cut, most cells on a line %d\n",
             spr_max_all, spr_cut_all, spr_cells_all);
+    fprintf(stderr, "tilemap lines overrun %d, board ticks lost %ld, longest waits (clocks) "
+                    "program %d tilemap %d sprites %d sound %d\n",
+            tm_ovr_all, lost_all, wait_all[0], wait_all[1], wait_all[2], wait_all[3]);
+#ifdef SDR_REAL
+    fprintf(stderr, "SDRAM protocol violations: %u\n", sd->violations);
+#endif
     if (audio) fprintf(stderr, "audio: %ld samples\n", audio_n);
     fprintf(stderr, "%d frames, %ld 68000 accesses and %ld DS5002 accesses traced, %llu clocks\n",
             frames, traced, mtraced, (unsigned long long)(cyc - cyc0));
