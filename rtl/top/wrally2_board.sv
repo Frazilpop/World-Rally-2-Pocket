@@ -222,7 +222,7 @@ wrally2_inputs u_inputs (
 wire        main_cs, main_ok;
 wire [19:1] main_addr;
 wire [63:0] main_line;
-wrally2_romport #(.AW(SDR_AW)) u_rp_main (
+wrally2_romport #(.AW(SDR_AW), .LINES(4)) u_rp_main (
     .clk(clk), .rst(cpu_rst),
     .cs(main_cs), .line(W_MAINCPU + {main_addr[19:3], 2'b00}),
     .ok(main_ok), .data(main_line),
