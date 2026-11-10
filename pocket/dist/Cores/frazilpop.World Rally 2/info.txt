@@ -1,4 +1,4 @@
-MC68000 @ 13 MHz, DS5002FP @ 13 MHz, Gaelco GAE1 video and 7-channel PCM sound
+Gaelco World Rally 2 board: MC68000 and DS5002FP @ 13 MHz, GAE1 video and 7-channel PCM sound
 
-Based on jlrh/gaelco-fpga cores/wrally2 (GPL-3.0).
+Based on jlrh's World Rally 2 MiSTer core (GPL-3.0), with jotego's jt8051 as the DS5002FP.
 Analogue Pocket port by Frazilpop.

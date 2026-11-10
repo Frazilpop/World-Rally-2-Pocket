@@ -9,8 +9,8 @@
             "description": "Gaelco's World Rally 2",
             "author": "frazilpop",
             "url": "https://github.com/Frazilpop/World-Rally-2-Pocket",
-            "version": "0.0.0",
-            "date_release": "2026-10-18"
+            "version": "1.0.0",
+            "date_release": "2026-11-10"
         },
         "framework": {
             "target_product": "Analogue Pocket",
