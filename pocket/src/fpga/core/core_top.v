@@ -931,7 +931,11 @@ wrally2_board #(.SDR_AW(SDR_AW), .NP(NP)) u_board (
 //   10 board time stopped (pause)
 //   11 a sprite line was cut short: its SDRAM fetches did not finish in
 //      the line (should stay red)
-//   12 a tilemap line was cut short (should stay red)
+//   12 a tilemap line was cut short (should stay red). Counted from the
+//      vblank after the one the CPUs start on: until then the board's ROM
+//      ports are held with the CPUs, the tilemap engine waits on its first
+//      fetch through every line, and the line it is in when they start
+//      can still run over. None of it is drawn by the game.
 //   13 the sprite buffer's copy ran outside vblank (should stay red)
 //   14 board time fell a whole credit (4,095 ticks) behind and lost ticks,
 //      which moves IRQ 6 in the picture (should stay red)
@@ -979,6 +983,7 @@ reg  [15:0]   spr_cuts = 16'd0;
 reg  [8:0]    vline = 9'd0, irq_line = 9'd0;
 reg           hb_q = 1'b0;
 reg           f_spr = 1'b0, f_tm = 1'b0, f_copy = 1'b0, f_owed = 1'b0, f_aud = 1'b0;
+reg           tm_arm = 1'b0;     // flag 12 counts (see above)
 reg  [63:0]   rb_line = 64'd0;
 reg           rb_req  = 1'b0;
 reg  [7:0]    frame   = 8'd0;
@@ -995,6 +1000,8 @@ always @(posedge clk_core) begin
     if (vb_rise)                         vline <= 9'd0;
     else if (hblank && !hb_q)            vline <= vline + 9'd1;
     if (diag_irq) irq_line <= vline;
+    if (!board_go)                   tm_arm <= 1'b0;
+    else if (vb_rise)                tm_arm <= 1'b1;   // the vblank after release's
     if (board_rst || diag_clr) begin
         for (pi = 0; pi < NP; pi = pi + 1) begin w_cnt[pi] <= 16'd0; w_max[pi] <= 16'd0; end
         w_ram <= 16'd0; w_ram_max <= 16'd0; owed_max <= 12'd0; spr_cuts <= 16'd0;
@@ -1011,7 +1018,7 @@ always @(posedge clk_core) begin
         if (diag_owed > owed_max)   owed_max <= diag_owed;
         if (diag_owed == 12'hfff)   f_owed   <= 1'b1;
         if (diag_spr_cut) begin f_spr <= 1'b1; spr_cuts <= sat_inc(spr_cuts); end
-        if (diag_tm_ovr)            f_tm     <= 1'b1;
+        if (diag_tm_ovr && tm_arm)  f_tm     <= 1'b1;
         if (diag_copying && !vblank_b) f_copy <= 1'b1;
         if (aud_under || aud_over)  f_aud    <= 1'b1;
     end
